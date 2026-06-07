@@ -166,6 +166,14 @@ class _SpecialistOutput(BaseModel):
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):
+    # Fail fast if required credentials are absent
+    for var in ("ELASTIC_ENDPOINT", "ELASTIC_API_KEY"):
+        if not os.environ.get(var):
+            raise RuntimeError(
+                f"Required environment variable '{var}' is not set. "
+                "Copy .env.example to .env and populate it before starting."
+            )
+
     elastic_mcp_url = os.environ.get("ELASTIC_MCP_URL", "").strip()
     _BUNDLED_BIN = "/usr/local/bin/elasticsearch-core-mcp-server"
 
@@ -466,9 +474,13 @@ async def _orchestrate(request: EvaluationRequest) -> EvaluationResponse:
     )
 
     # ── Agent 1: Fact Auditor ─────────────────────────────────────────────
-    audit_findings, grounding_docs = await _run_agent1_auditor(
-        request.narrative, request.context
-    )
+    try:
+        audit_findings, grounding_docs = await _run_agent1_auditor(
+            request.narrative, request.context
+        )
+    except Exception as exc:
+        logger.error("Agent 1 (Fact Auditor) failed: %s", exc)
+        raise HTTPException(status_code=502, detail=f"Fact Auditor agent failure: {exc}")
     logger.info("Auditor complete | audit_chars=%d", len(audit_findings))
 
     # ── Agent 2: Sovereign Risk Specialist ────────────────────────────────
