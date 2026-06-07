@@ -78,6 +78,8 @@ async def search_macro_data(query: str) -> str:
 
     Returns top document chunks with source citations and relevance metadata.
     """
+    global _rrf_unavailable  # must be declared before any read or write of the flag
+
     if _call_elastic_tool is None:
         return "Elastic MCP session not initialised — server is starting up."
 
@@ -132,7 +134,6 @@ async def search_macro_data(query: str) -> str:
                 return formatted
             logger.debug("RRF returned no hits — trying keyword fallback")
         except Exception as exc:
-            global _rrf_unavailable
             _rrf_unavailable = True
             logger.warning(
                 "Hybrid RRF unavailable (%s) — switching to keyword search for this session",
