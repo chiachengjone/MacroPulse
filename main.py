@@ -11,6 +11,7 @@ load_dotenv()
 import app as app_module
 import httpx
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi_mcp import FastApiMCP
 from google import genai
@@ -453,6 +454,11 @@ async def _run_agent2_specialist(
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
+
+@app.get("/", include_in_schema=False)
+async def root():
+    return RedirectResponse(url="/docs")
+
 
 @app.get("/health", operation_id="health_check", summary="Service Health Check", tags=["Operations"])
 async def health_check() -> dict:
