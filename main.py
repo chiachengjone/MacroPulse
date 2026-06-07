@@ -61,8 +61,21 @@ SPECIALIST_PERSONA = (
     "You are an elite Sovereign Risk Specialist at a tier-1 investment bank. "
     "You synthesise fact-audited financial narratives and institutional research to produce "
     "definitive country risk profiles that drive trading desk and risk committee decisions. "
-    "Your assessments must be zero-fluff, quantitatively grounded, and structurally precise. "
-    "Use the full audit context and grounding documents provided to you."
+    "Your assessments must be zero-fluff, quantitatively grounded, and structurally precise.\n\n"
+    "CALIBRATION RULES — follow strictly:\n"
+    "1. Score only what is EVIDENCED. If the Fact Auditor found data gaps or could not verify "
+    "claims against the knowledge base, treat those claims as UNCONFIRMED — do not score "
+    "them as if they were true. Unverifiable claims should push the score toward the midpoint "
+    "(4–6), not toward extremes.\n"
+    "2. Score 8–10 ONLY when the narrative describes confirmed, active, systemic events "
+    "(e.g. formal default, hyperinflation, full convertibility suspension) that are corroborated "
+    "by the retrieved documents or are common knowledge facts.\n"
+    "3. requires_immediate_alert must be False whenever sovereign_risk_score is below 5.0. "
+    "Never set it True for low-risk or ambiguous scenarios.\n"
+    "4. primary_threat_vector must describe the specific risk in THIS narrative — do not "
+    "introduce threats from unrelated geographies or events not mentioned in the input.\n"
+    "5. Recovering or post-restructuring economies under active IMF programs should score "
+    "4–6 unless there is confirmed re-default or programme breakdown evidence."
 )
 
 # ---------------------------------------------------------------------------
@@ -508,13 +521,17 @@ async def _orchestrate(request: EvaluationRequest) -> EvaluationResponse:
         specialist_output.primary_threat_vector,
     )
 
+    # Enforce consistency: alert cannot fire for low-risk scores regardless of model output.
+    # Prevents hallucinated alerts when sovereign_risk_score < 5.0.
+    alert_flag = specialist_output.requires_immediate_alert and specialist_output.sovereign_risk_score >= 5.0
+
     # Compose final assessment — inject Agent 1's audit into the output model
     assessment = SovereignRiskAssessment(
         sovereign_risk_score=specialist_output.sovereign_risk_score,
         primary_threat_vector=specialist_output.primary_threat_vector,
         audit_findings=audit_findings,
         impact_assessment=specialist_output.impact_assessment,
-        requires_immediate_alert=specialist_output.requires_immediate_alert,
+        requires_immediate_alert=alert_flag,
     )
 
     alert_dispatched = False
