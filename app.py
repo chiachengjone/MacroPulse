@@ -27,7 +27,23 @@ async def search_macro_data(query: str) -> str:
     """
     if _call_elastic_tool is None:
         return "Elastic MCP session not initialised — server is starting up."
-    result = await _call_elastic_tool("search", {"index": INDEX_NAME, "query": query})
+    result = await _call_elastic_tool(
+        "search",
+        {
+            "index": INDEX_NAME,
+            "query_body": {
+                "query": {
+                    "match": {
+                        "attachment.content": {
+                            "query": query,
+                            "operator": "or",
+                        }
+                    }
+                },
+                "size": 3,
+            },
+        },
+    )
     return _format_tool_result(result)
 
 
