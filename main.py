@@ -17,6 +17,7 @@ from google import genai
 from google.genai import types
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+from mcp.client.streamable_http import streamablehttp_client
 from pydantic import BaseModel, Field
 
 # ---------------------------------------------------------------------------
@@ -137,13 +138,31 @@ async def lifespan(application: FastAPI):
     elastic_mcp_url = os.environ.get("ELASTIC_MCP_URL", "").strip()
 
     if elastic_mcp_url:
-        # Production (Cloud Run): connect to the deployed Elastic MCP HTTP service
-        from fastmcp import Client as FastMCPClient
-        logger.info("Elastic MCP: connecting via HTTP → %s", elastic_mcp_url)
-        async with FastMCPClient(elastic_mcp_url) as fmcp:
-            app_module._call_elastic_tool = fmcp.call_tool
-            logger.info("Elastic MCP HTTP session ready")
-            yield
+        # Production (Cloud Run): connect to the private Elastic MCP service via HTTP.
+        # Uses Google ID token for service-to-service authentication.
+        import google.auth.transport.requests
+        import google.oauth2.id_token
+
+        logger.info("Elastic MCP: fetching ID token for %s", elastic_mcp_url)
+        _req = google.auth.transport.requests.Request()
+        id_token = await asyncio.to_thread(
+            google.oauth2.id_token.fetch_id_token, _req, elastic_mcp_url
+        )
+
+        logger.info("Elastic MCP: connecting via HTTP → %s/mcp", elastic_mcp_url)
+        async with streamablehttp_client(
+            url=f"{elastic_mcp_url}/mcp",
+            headers={"Authorization": f"Bearer {id_token}"},
+        ) as (read, write, _):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                app_module._call_elastic_tool = session.call_tool
+                tools = await session.list_tools()
+                logger.info(
+                    "Elastic MCP HTTP session ready | tools=%s",
+                    [t.name for t in tools.tools],
+                )
+                yield
     else:
         # Local development: spawn the official Elastic Docker MCP server via stdio
         logger.info("Elastic MCP: spawning Docker stdio subprocess")
