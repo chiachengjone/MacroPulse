@@ -41,7 +41,7 @@ genai_client = genai.Client(
     location=os.environ.get("GOOGLE_CLOUD_LOCATION", "global"),
 )
 
-GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_MODEL = "gemini-2.5-pro"
 
 # ---------------------------------------------------------------------------
 # Agent personas
@@ -265,7 +265,7 @@ app = FastAPI(
         "grounded by Elasticsearch Serverless hybrid retrieval (RRF text + vector), "
         "exposed over MCP for Agent Builder integration."
     ),
-    version="5.0.0",
+    version="5.1.0",
     lifespan=lifespan,
 )
 
