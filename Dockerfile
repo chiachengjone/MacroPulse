@@ -1,4 +1,11 @@
+FROM --platform=linux/amd64 docker.elastic.co/mcp/elasticsearch AS elastic-mcp
+
 FROM python:3.11-slim
+
+# Bundle the Elastic MCP binary so it can run as a stdio subprocess inside
+# the same container — no Docker-in-Docker, no separate Cloud Run service.
+COPY --from=elastic-mcp /usr/local/bin/elasticsearch-core-mcp-server \
+                         /usr/local/bin/elasticsearch-core-mcp-server
 
 WORKDIR /app
 

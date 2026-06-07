@@ -137,9 +137,10 @@ class RiskEvaluationResponse(BaseModel):
 async def lifespan(application: FastAPI):
     elastic_mcp_url = os.environ.get("ELASTIC_MCP_URL", "").strip()
 
+    _BUNDLED_BIN = "/usr/local/bin/elasticsearch-core-mcp-server"
+
     if elastic_mcp_url:
-        # Production (Cloud Run): connect to the private Elastic MCP service via HTTP.
-        # Uses Google ID token for service-to-service authentication.
+        # Explicit HTTP transport (reserved for future external MCP server).
         import google.auth.transport.requests
         import google.oauth2.id_token
 
@@ -163,8 +164,34 @@ async def lifespan(application: FastAPI):
                     [t.name for t in tools.tools],
                 )
                 yield
+
+    elif os.path.isfile(_BUNDLED_BIN):
+        # Production (Cloud Run): use the Elastic MCP binary bundled in the image.
+        # Runs as a stdio subprocess — same network context as MacroPulse, no
+        # Docker-in-Docker, no separate service.
+        logger.info("Elastic MCP: spawning bundled binary %s", _BUNDLED_BIN)
+        server_params = StdioServerParameters(
+            command=_BUNDLED_BIN,
+            args=["stdio"],
+            env={
+                **os.environ,
+                "ES_URL": os.environ["ELASTIC_ENDPOINT"],
+                "ES_API_KEY": os.environ["ELASTIC_API_KEY"],
+            },
+        )
+        async with stdio_client(server_params) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                app_module._call_elastic_tool = session.call_tool
+                tools = await session.list_tools()
+                logger.info(
+                    "Elastic MCP binary session ready | tools=%s",
+                    [t.name for t in tools.tools],
+                )
+                yield
+
     else:
-        # Local development: spawn the official Elastic Docker MCP server via stdio
+        # Local development: spawn the official Elastic Docker MCP server via stdio.
         logger.info("Elastic MCP: spawning Docker stdio subprocess")
         server_params = StdioServerParameters(
             command="docker",
