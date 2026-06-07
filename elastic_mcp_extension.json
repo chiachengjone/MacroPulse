@@ -1,0 +1,95 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Elasticsearch MCP Bridge API",
+    "description": "Enterprise extension allowing Gemini to perform advanced semantic, vector, and keyword queries on the macro database via the Model Context Protocol.",
+    "version": "1.0.0"
+  },
+  "servers": [
+    {
+      "url": "https://YOUR-CLOUD-RUN-OR-PROXY-URL.a.run.app",
+      "description": "Hosted Elastic MCP Server Endpoint"
+    }
+  ],
+  "paths": {
+    "/indices": {
+      "get": {
+        "summary": "List available Elasticsearch indices",
+        "description": "Invoked by the agent to inspect the current database schema, verify available indices, and look up structural field mappings.",
+        "operationId": "listIndices",
+        "responses": {
+          "200": {
+            "description": "Successful retrieval of index metadata.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/search": {
+      "post": {
+        "summary": "Execute query on Elasticsearch index",
+        "description": "Invoked by the agent to run hybrid keyword (BM25) and dense vector semantic searches across indexed institutional finance reports.",
+        "operationId": "searchIndex",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["index", "query"],
+                "properties": {
+                  "index": {
+                    "type": "string",
+                    "description": "The target index name, e.g., 'macropulse_corpus'."
+                  },
+                  "query": {
+                    "type": "string",
+                    "description": "The search phrase, economic indicator, or semantic context to look up."
+                  },
+                  "geography": {
+                    "type": "string",
+                    "description": "Optional ISO metadata filter to restrict results geographically (e.g., 'SG', 'US')."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Search execution successful.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "hits": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "text_content": { "type": "string" },
+                          "score": { "type": "number" },
+                          "metadata": { "type": "object" }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
