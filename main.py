@@ -30,7 +30,9 @@ logging.basicConfig(
 logger = logging.getLogger("macropulse")
 
 # ---------------------------------------------------------------------------
-# GenAI Client — Vertex AI enterprise path.
+# Vertex AI / Gemini client — uses project-bound Application Default Credentials.
+# Locally: `gcloud auth application-default login`
+# Cloud Run: resolved automatically from the attached service account.
 # ---------------------------------------------------------------------------
 genai_client = genai.Client(
     vertexai=True,
@@ -40,25 +42,39 @@ genai_client = genai.Client(
 
 GEMINI_MODEL = "gemini-2.5-flash"
 
-SYSTEM_PERSONA = (
-    "You are an elite Global Markets Macro Quantitative Analyst and Credit Risk Officer "
-    "at a tier-1 investment bank. Your objective is to ingest complex, unstructured financial "
-    "narratives, extract quantitative risk metrics, and output a strict, zero-fluff risk summary. "
-    "Use the search_macro_data tool to retrieve relevant macro-economic research before finalising "
-    "your assessment. Search at least once with targeted keywords, then produce your structured output."
+# ---------------------------------------------------------------------------
+# Agent personas
+# ---------------------------------------------------------------------------
+AUDITOR_PERSONA = (
+    "You are a Fact Auditor at an independent sovereign credit rating agency. "
+    "Your sole function is to rigorously cross-reference financial narratives against "
+    "retrieved institutional research documents. Identify: (1) DATA GAPS — specific claims "
+    "in the narrative that lack supporting evidence in the retrieved corpus; (2) INFLATIONS — "
+    "language that appears exaggerated, sensationalist, or quantitatively unsupported; "
+    "(3) ERRORS — factual inaccuracies contradicted by the evidence. "
+    "Use the search_macro_data tool to gather supporting documents before writing your report. "
+    "Be precise, cite specific discrepancies, and remain analytically neutral."
+)
+
+SPECIALIST_PERSONA = (
+    "You are an elite Sovereign Risk Specialist at a tier-1 investment bank. "
+    "You synthesise fact-audited financial narratives and institutional research to produce "
+    "definitive country risk profiles that drive trading desk and risk committee decisions. "
+    "Your assessments must be zero-fluff, quantitatively grounded, and structurally precise. "
+    "Use the full audit context and grounding documents provided to you."
 )
 
 # ---------------------------------------------------------------------------
-# Elastic MCP search tool declaration for Gemini function calling
+# Elastic MCP search tool declaration (used by Agent 1's tool-calling loop)
 # ---------------------------------------------------------------------------
 _SEARCH_TOOL = types.Tool(
     function_declarations=[
         types.FunctionDeclaration(
             name="search_macro_data",
             description=(
-                "Search the MacroPulse macro-economic knowledge base for relevant institutional "
-                "finance documents. Call this with targeted economic keywords before producing "
-                "the final risk assessment."
+                "Search the MacroPulse macro-economic knowledge base using hybrid retrieval "
+                "(RRF text + vector). Call with targeted economic keywords to retrieve "
+                "institutional research documents that ground your analysis."
             ),
             parameters=types.Schema(
                 type=types.Type.OBJECT,
@@ -66,7 +82,7 @@ _SEARCH_TOOL = types.Tool(
                     "query": types.Schema(
                         type=types.Type.STRING,
                         description=(
-                            "Search query — use economic indicators, sovereign risk terms, "
+                            "Search query — economic indicators, sovereign risk terms, "
                             "asset class names, or scenario-specific keywords."
                         ),
                     )
@@ -81,7 +97,7 @@ _SEARCH_TOOL = types.Tool(
 # Pydantic Models
 # ---------------------------------------------------------------------------
 
-class RiskEvaluationRequest(BaseModel):
+class EvaluationRequest(BaseModel):
     narrative: str = Field(
         ...,
         description="Unstructured financial narrative or macro scenario to evaluate.",
@@ -89,28 +105,35 @@ class RiskEvaluationRequest(BaseModel):
     )
     context: Optional[str] = Field(
         None,
-        description="Optional framing context such as asset class, issuer, or geographic region.",
+        description="Optional framing context — asset class, issuer, or geographic region.",
     )
 
 
-class RiskAssessment(BaseModel):
+class SovereignRiskAssessment(BaseModel):
     sovereign_risk_score: float = Field(
         ...,
-        ge=1.0,
+        ge=0.0,
         le=10.0,
-        description="Composite sovereign risk score from 1.0 (negligible) to 10.0 (systemic collapse).",
+        description="Composite sovereign risk score: 0.0 (negligible) → 10.0 (systemic collapse).",
     )
     primary_threat_vector: str = Field(
         ...,
         description=(
-            "Single dominant risk classification, e.g. 'Liquidity Crunch', "
-            "'FX Volatility', 'Fiscal Deficit Expansion', 'Sovereign Default Risk'."
+            "Single dominant risk classification, e.g. 'Sovereign Default Risk', "
+            "'FX Volatility', 'Liquidity Crunch', 'Fiscal Deficit Expansion'."
+        ),
+    )
+    audit_findings: str = Field(
+        ...,
+        description=(
+            "Structured findings from the Fact Auditor: data gaps, inflations, "
+            "and factual errors identified in the original narrative."
         ),
     )
     impact_assessment: str = Field(
         ...,
         description=(
-            "Concise structural narrative covering transmission mechanisms, "
+            "Definitive structural narrative covering transmission mechanisms, "
             "affected asset classes, and second-order macro consequences."
         ),
     )
@@ -123,11 +146,19 @@ class RiskAssessment(BaseModel):
     )
 
 
-class RiskEvaluationResponse(BaseModel):
-    assessment: RiskAssessment
+class EvaluationResponse(BaseModel):
+    assessment: SovereignRiskAssessment
     model_used: str
     evaluation_timestamp: str
     alert_dispatched: bool
+
+
+# Internal model used by Agent 2 (excludes audit_findings — injected from Agent 1)
+class _SpecialistOutput(BaseModel):
+    sovereign_risk_score: float = Field(..., ge=0.0, le=10.0)
+    primary_threat_vector: str
+    impact_assessment: str
+    requires_immediate_alert: bool
 
 # ---------------------------------------------------------------------------
 # Lifespan — Elastic MCP client startup / teardown
@@ -136,11 +167,10 @@ class RiskEvaluationResponse(BaseModel):
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     elastic_mcp_url = os.environ.get("ELASTIC_MCP_URL", "").strip()
-
     _BUNDLED_BIN = "/usr/local/bin/elasticsearch-core-mcp-server"
 
     if elastic_mcp_url:
-        # Explicit HTTP transport (reserved for future external MCP server).
+        # HTTP transport to an external Elastic MCP Cloud Run service
         import google.auth.transport.requests
         import google.oauth2.id_token
 
@@ -149,8 +179,6 @@ async def lifespan(application: FastAPI):
         id_token = await asyncio.to_thread(
             google.oauth2.id_token.fetch_id_token, _req, elastic_mcp_url
         )
-
-        logger.info("Elastic MCP: connecting via HTTP → %s/mcp", elastic_mcp_url)
         async with streamablehttp_client(
             url=f"{elastic_mcp_url}/mcp",
             headers={"Authorization": f"Bearer {id_token}"},
@@ -159,16 +187,12 @@ async def lifespan(application: FastAPI):
                 await session.initialize()
                 app_module._call_elastic_tool = session.call_tool
                 tools = await session.list_tools()
-                logger.info(
-                    "Elastic MCP HTTP session ready | tools=%s",
-                    [t.name for t in tools.tools],
-                )
+                logger.info("Elastic MCP HTTP ready | tools=%s", [t.name for t in tools.tools])
                 yield
 
     elif os.path.isfile(_BUNDLED_BIN):
-        # Production (Cloud Run): use the Elastic MCP binary bundled in the image.
-        # Runs as a stdio subprocess — same network context as MacroPulse, no
-        # Docker-in-Docker, no separate service.
+        # Production (Cloud Run): bundled binary as stdio subprocess — same network
+        # context as MacroPulse, no Docker-in-Docker, no separate service.
         logger.info("Elastic MCP: spawning bundled binary %s", _BUNDLED_BIN)
         server_params = StdioServerParameters(
             command=_BUNDLED_BIN,
@@ -184,14 +208,11 @@ async def lifespan(application: FastAPI):
                 await session.initialize()
                 app_module._call_elastic_tool = session.call_tool
                 tools = await session.list_tools()
-                logger.info(
-                    "Elastic MCP binary session ready | tools=%s",
-                    [t.name for t in tools.tools],
-                )
+                logger.info("Elastic MCP binary ready | tools=%s", [t.name for t in tools.tools])
                 yield
 
     else:
-        # Local development: spawn the official Elastic Docker MCP server via stdio.
+        # Local development: Docker stdio subprocess
         logger.info("Elastic MCP: spawning Docker stdio subprocess")
         server_params = StdioServerParameters(
             command="docker",
@@ -208,10 +229,7 @@ async def lifespan(application: FastAPI):
                 await session.initialize()
                 app_module._call_elastic_tool = session.call_tool
                 tools = await session.list_tools()
-                logger.info(
-                    "Elastic MCP Docker session ready | tools=%s",
-                    [t.name for t in tools.tools],
-                )
+                logger.info("Elastic MCP Docker ready | tools=%s", [t.name for t in tools.tools])
                 yield
 
     app_module._call_elastic_tool = None
@@ -223,10 +241,12 @@ async def lifespan(application: FastAPI):
 app = FastAPI(
     title="MacroPulse Analytics Bridge",
     description=(
-        "Agentic Financial Intelligence Platform — multi-step macro research "
-        "and credit risk orchestration via Gemini 2.5 Flash + Elastic MCP, exposed over MCP."
+        "Enterprise-grade multi-agent RAG platform — Gemini 2.5 Flash (Vertex AI) "
+        "orchestrates a two-agent correction loop (Fact Auditor → Sovereign Risk Specialist) "
+        "grounded by Elasticsearch Serverless hybrid retrieval (RRF text + vector), "
+        "exposed over MCP for Agent Builder integration."
     ),
-    version="4.0.0",
+    version="5.0.0",
     lifespan=lifespan,
 )
 
@@ -238,7 +258,7 @@ app.add_middleware(
 )
 
 # ---------------------------------------------------------------------------
-# Background-task tracking (prevents GC of fire-and-forget coroutines)
+# Background task tracking — prevents GC of fire-and-forget coroutines
 # ---------------------------------------------------------------------------
 _background_tasks: set = set()
 
@@ -254,44 +274,28 @@ def _fire_and_forget(coro) -> asyncio.Task:
 # ---------------------------------------------------------------------------
 
 async def trigger_trading_desk_webhook(ticket: dict) -> None:
-    webhook_url = os.environ.get(
-        "TRADING_DESK_WEBHOOK_URL", "https://httpbin.org/post"
-    )
-
+    webhook_url = os.environ.get("TRADING_DESK_WEBHOOK_URL", "https://httpbin.org/post")
     score: float = ticket.get("sovereign_risk_score", 0.0)
 
     if score >= 9.0:
-        severity = "CRITICAL"
-        escalation_policy = "IMMEDIATE_DESK_REVIEW"
-        sla_minutes = 5
+        severity, policy, sla = "CRITICAL", "IMMEDIATE_DESK_REVIEW", 5
     elif score >= 7.5:
-        severity = "HIGH"
-        escalation_policy = "IMMEDIATE_DESK_REVIEW"
-        sla_minutes = 15
+        severity, policy, sla = "HIGH", "IMMEDIATE_DESK_REVIEW", 15
     elif score >= 5.0:
-        severity = "MEDIUM"
-        escalation_policy = "STANDARD_REVIEW_QUEUE"
-        sla_minutes = 60
+        severity, policy, sla = "MEDIUM", "STANDARD_REVIEW_QUEUE", 60
     else:
-        severity = "LOW"
-        escalation_policy = "DAILY_DIGEST"
-        sla_minutes = 1440
+        severity, policy, sla = "LOW", "DAILY_DIGEST", 1440
 
     payload = {
         "event_type": "MACRO_RISK_ALERT",
-        "schema_version": "4.0",
+        "schema_version": "5.0",
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "severity": severity,
-        "sla_resolution_minutes": sla_minutes,
-        "source_system": "MacroPulse Analytics Bridge v4",
-        "escalation_policy": escalation_policy,
+        "sla_resolution_minutes": sla,
+        "source_system": "MacroPulse Analytics Bridge v5",
+        "escalation_policy": policy,
         "routing_key": f"risk.{severity.lower()}.sovereign",
-        "risk_parameters": {
-            "sovereign_risk_score": ticket["sovereign_risk_score"],
-            "primary_threat_vector": ticket["primary_threat_vector"],
-            "impact_assessment": ticket["impact_assessment"],
-            "requires_immediate_alert": ticket["requires_immediate_alert"],
-        },
+        "risk_parameters": ticket,
     }
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as http_client:
@@ -301,175 +305,236 @@ async def trigger_trading_desk_webhook(ticket: dict) -> None:
                 json=payload,
                 headers={
                     "Content-Type": "application/json",
-                    "X-MacroPulse-Version": "4.0",
+                    "X-MacroPulse-Version": "5.0",
                     "X-Alert-Severity": severity,
                 },
             )
             resp.raise_for_status()
             logger.info(
-                "Trading desk alert dispatched | severity=%s | score=%.2f | http_status=%d",
+                "Alert dispatched | severity=%s | score=%.2f | status=%d",
                 severity, score, resp.status_code,
             )
-        except httpx.HTTPStatusError as exc:
-            logger.error("Webhook delivery failed | http_status=%d | detail=%s", exc.response.status_code, exc)
-        except httpx.RequestError as exc:
-            logger.error("Webhook network error | detail=%s", exc)
+        except (httpx.HTTPStatusError, httpx.RequestError) as exc:
+            logger.error("Webhook delivery failed: %s", exc)
 
 # ---------------------------------------------------------------------------
-# Routes
+# Core orchestration — two-agent cascade
 # ---------------------------------------------------------------------------
 
-@app.get(
-    "/health",
-    operation_id="health_check",
-    summary="Service Health Check",
-    tags=["Operations"],
-)
-async def health_check() -> dict:
-    return {
-        "status": "healthy",
-        "service": "MacroPulse Analytics Bridge",
-        "version": "4.0.0",
-        "model": GEMINI_MODEL,
-        "elastic_mcp": "connected" if app_module._call_elastic_tool else "disconnected",
-    }
+async def _run_agent1_auditor(
+    narrative: str,
+    context: Optional[str],
+    max_turns: int = 4,
+) -> tuple[str, str]:
+    """
+    Agent 1 — Fact Auditor.
 
+    Uses the Elastic MCP search tool to gather grounding documents, then
+    produces a structured audit report identifying data gaps, inflations,
+    and factual errors in the narrative.
 
-@app.post(
-    "/evaluate-risk",
-    response_model=RiskEvaluationResponse,
-    operation_id="evaluate_macro_risk",
-    summary="Evaluate Macro & Sovereign Risk",
-    description=(
-        "Ingest an unstructured financial narrative and return a structured credit risk "
-        "assessment. Gemini 2.5 Flash runs a multi-step agentic loop: it calls the Elastic "
-        "MCP search tool one or more times to retrieve grounding evidence, then produces a "
-        "structured RiskAssessment. When sovereign_risk_score ≥ 7.5 or requires_immediate_alert "
-        "is true, an async alert payload is dispatched to the configured trading desk webhook."
-    ),
-    tags=["Risk Intelligence"],
-)
-async def evaluate_risk(request: RiskEvaluationRequest) -> RiskEvaluationResponse:
-    logger.info("Risk evaluation requested | narrative_chars=%d", len(request.narrative))
+    Returns: (audit_findings_text, combined_grounding_docs)
+    """
+    prompt = (
+        f"NARRATIVE TO AUDIT:\n{narrative}"
+        + (f"\n\nCONTEXT: {context}" if context else "")
+        + "\n\nUse search_macro_data to retrieve supporting documents, then write "
+          "a structured fact-audit identifying: DATA GAPS, INFLATIONS, ERRORS."
+    )
 
-    # Build the initial user prompt
-    prompt_parts = [request.narrative]
-    if request.context:
-        prompt_parts.append(f"Additional context: {request.context}")
-    user_prompt = "\n\n".join(prompt_parts)
+    contents: list = [types.Content(role="user", parts=[types.Part(text=prompt)])]
+    grounding_chunks: list[str] = []
 
-    # -----------------------------------------------------------------------
-    # Phase 1 — Agentic tool-calling loop
-    # Gemini decides when and how many times to call search_macro_data.
-    # We cap at MAX_TURNS to avoid runaway loops.
-    # -----------------------------------------------------------------------
-    contents: list = [types.Content(role="user", parts=[types.Part(text=user_prompt)])]
-    MAX_TURNS = 6
-
-    for turn in range(MAX_TURNS):
+    for turn in range(max_turns):
         response = await genai_client.aio.models.generate_content(
             model=GEMINI_MODEL,
             contents=contents,
             config=types.GenerateContentConfig(
-                system_instruction=SYSTEM_PERSONA,
+                system_instruction=AUDITOR_PERSONA,
                 tools=[_SEARCH_TOOL],
             ),
         )
-
         candidate = response.candidates[0]
         fn_calls = [p.function_call for p in candidate.content.parts if p.function_call]
 
         if not fn_calls:
-            # Model finished reasoning — no more tool calls
-            logger.info("Agent loop complete | turns_used=%d", turn + 1)
+            logger.info("Auditor search loop done | turns=%d", turn + 1)
             break
 
-        # Add model's response (with function calls) to conversation history
         contents.append(candidate.content)
-
-        # Execute each tool call and collect responses
-        fn_response_parts: list[types.Part] = []
+        fn_parts: list[types.Part] = []
         for fc in fn_calls:
             if fc.name == "search_macro_data":
-                logger.info("Gemini → search_macro_data | query=%r", fc.args.get("query"))
+                logger.info("Agent1 → search_macro_data | query=%r", fc.args.get("query"))
                 result = await app_module.search_macro_data(fc.args["query"])
-                fn_response_parts.append(
+                grounding_chunks.append(result)
+                fn_parts.append(
                     types.Part(
                         function_response=types.FunctionResponse(
-                            name=fc.name,
-                            response={"result": result},
+                            name=fc.name, response={"result": result}
                         )
                     )
                 )
-
-        contents.append(types.Content(role="user", parts=fn_response_parts))
+        contents.append(types.Content(role="user", parts=fn_parts))
     else:
-        logger.warning("Agent loop hit MAX_TURNS=%d without stopping naturally", MAX_TURNS)
+        logger.warning("Auditor loop hit MAX_TURNS=%d", max_turns)
 
-    # -----------------------------------------------------------------------
-    # Phase 2 — Structured extraction
-    # Force a final structured-output call using the full conversation history
-    # as grounding context (no tools — we want JSON output, not another call).
-    # -----------------------------------------------------------------------
+    # Force audit report extraction
     contents.append(
         types.Content(
             role="user",
             parts=[types.Part(
                 text=(
-                    "Based on all the macro research retrieved above, now produce "
-                    "the final structured risk assessment for the original narrative."
+                    "Now write your complete fact-audit report. Structure it with clear "
+                    "sections: DATA GAPS, INFLATIONS, ERRORS, and an overall ACCURACY RATING (0-10). "
+                    "Be specific and cite the retrieved documents."
                 )
             )],
         )
     )
+    audit_response = await genai_client.aio.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=contents,
+        config=types.GenerateContentConfig(system_instruction=AUDITOR_PERSONA),
+    )
+    audit_text = getattr(audit_response, "text", "") or ""
+    combined_grounding = "\n\n===\n\n".join(grounding_chunks) if grounding_chunks else ""
+    return audit_text, combined_grounding
+
+
+async def _run_agent2_specialist(
+    narrative: str,
+    context: Optional[str],
+    audit_findings: str,
+    grounding_docs: str,
+) -> _SpecialistOutput:
+    """
+    Agent 2 — Sovereign Risk Specialist.
+
+    Synthesises the original narrative, the Auditor's findings, and the raw
+    grounding documents into a structured sovereign risk assessment.
+    """
+    prompt = "\n\n".join(filter(None, [
+        f"ORIGINAL NARRATIVE:\n{narrative}",
+        f"CONTEXT: {context}" if context else None,
+        f"GROUNDING DOCUMENTS (Elasticsearch):\n{grounding_docs}" if grounding_docs else None,
+        f"FACT AUDITOR REPORT:\n{audit_findings}",
+        (
+            "Based on ALL the above, produce the final sovereign risk assessment. "
+            "Your score must reflect the audit-adjusted picture, not just the narrative's claims."
+        ),
+    ]))
 
     try:
-        final_response = await genai_client.aio.models.generate_content(
+        response = await genai_client.aio.models.generate_content(
             model=GEMINI_MODEL,
-            contents=contents,
+            contents=prompt,
             config=types.GenerateContentConfig(
-                system_instruction=SYSTEM_PERSONA,
+                system_instruction=SPECIALIST_PERSONA,
                 response_mime_type="application/json",
-                response_schema=RiskAssessment,
+                response_schema=_SpecialistOutput,
             ),
         )
+        if getattr(response, "parsed", None) is not None:
+            return response.parsed
+        return _SpecialistOutput.model_validate_json(response.text)
     except Exception as exc:
-        logger.error("Gemini structured-output call failed | detail=%s", exc)
-        raise HTTPException(status_code=502, detail=f"LLM orchestration failure: {exc}")
+        logger.error("Agent 2 structured output failed: %s", exc)
+        raise HTTPException(status_code=502, detail=f"Specialist agent failure: {exc}")
 
-    try:
-        assessment: RiskAssessment = (
-            final_response.parsed
-            if getattr(final_response, "parsed", None) is not None
-            else RiskAssessment.model_validate_json(final_response.text)
-        )
-    except Exception as exc:
-        logger.error(
-            "Schema validation failure | raw=%r | error=%s",
-            getattr(final_response, "text", "<no text>"),
-            exc,
-        )
-        raise HTTPException(
-            status_code=500,
-            detail="Risk assessment schema validation failed.",
-        )
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+
+@app.get("/health", operation_id="health_check", summary="Service Health Check", tags=["Operations"])
+async def health_check() -> dict:
+    return {
+        "status": "healthy",
+        "service": "MacroPulse Analytics Bridge",
+        "version": "5.0.0",
+        "model": GEMINI_MODEL,
+        "elastic_mcp": "connected" if app_module._call_elastic_tool else "disconnected",
+    }
+
+
+async def _orchestrate(request: EvaluationRequest) -> EvaluationResponse:
+    """Shared handler for both route aliases."""
+    logger.info(
+        "Evaluation requested | narrative_chars=%d | context=%r",
+        len(request.narrative),
+        request.context,
+    )
+
+    # ── Agent 1: Fact Auditor ─────────────────────────────────────────────
+    audit_findings, grounding_docs = await _run_agent1_auditor(
+        request.narrative, request.context
+    )
+    logger.info("Auditor complete | audit_chars=%d", len(audit_findings))
+
+    # ── Agent 2: Sovereign Risk Specialist ────────────────────────────────
+    specialist_output = await _run_agent2_specialist(
+        request.narrative, request.context, audit_findings, grounding_docs
+    )
+    logger.info(
+        "Specialist complete | score=%.2f | threat=%r",
+        specialist_output.sovereign_risk_score,
+        specialist_output.primary_threat_vector,
+    )
+
+    # Compose final assessment — inject Agent 1's audit into the output model
+    assessment = SovereignRiskAssessment(
+        sovereign_risk_score=specialist_output.sovereign_risk_score,
+        primary_threat_vector=specialist_output.primary_threat_vector,
+        audit_findings=audit_findings,
+        impact_assessment=specialist_output.impact_assessment,
+        requires_immediate_alert=specialist_output.requires_immediate_alert,
+    )
 
     alert_dispatched = False
     if assessment.sovereign_risk_score >= 7.5 or assessment.requires_immediate_alert:
         _fire_and_forget(trigger_trading_desk_webhook(assessment.model_dump()))
         alert_dispatched = True
         logger.info(
-            "Alert queued | score=%.2f | requires_immediate_alert=%s",
+            "Alert queued | score=%.2f | immediate=%s",
             assessment.sovereign_risk_score,
             assessment.requires_immediate_alert,
         )
 
-    return RiskEvaluationResponse(
+    return EvaluationResponse(
         assessment=assessment,
         model_used=GEMINI_MODEL,
         evaluation_timestamp=datetime.now(timezone.utc).isoformat(),
         alert_dispatched=alert_dispatched,
     )
+
+
+@app.post(
+    "/api/v1/evaluate",
+    response_model=EvaluationResponse,
+    operation_id="evaluate_sovereign_risk",
+    summary="Multi-Agent Sovereign Risk Evaluation",
+    description=(
+        "Two-agent cascade: Agent 1 (Fact Auditor) retrieves grounding documents via "
+        "Elasticsearch hybrid search and audits the narrative for gaps/errors; "
+        "Agent 2 (Sovereign Risk Specialist) synthesises the audit and evidence into "
+        "a structured SovereignRiskAssessment. Alerts fire when score ≥ 7.5."
+    ),
+    tags=["Risk Intelligence"],
+)
+async def evaluate_v1(request: EvaluationRequest) -> EvaluationResponse:
+    return await _orchestrate(request)
+
+
+@app.post(
+    "/evaluate-risk",
+    response_model=EvaluationResponse,
+    operation_id="evaluate_macro_risk_legacy",
+    summary="Evaluate Macro & Sovereign Risk (legacy alias)",
+    tags=["Risk Intelligence"],
+    include_in_schema=True,
+)
+async def evaluate_risk_legacy(request: EvaluationRequest) -> EvaluationResponse:
+    return await _orchestrate(request)
 
 # ---------------------------------------------------------------------------
 # MCP Server — mount AFTER all routes are registered
@@ -478,9 +543,8 @@ mcp = FastApiMCP(
     app,
     name="MacroPulse Analytics Bridge",
     description=(
-        "Model Context Protocol server exposing macro risk evaluation tools "
-        "for Google Cloud Agent Builder integration. Provides structured sovereign "
-        "risk scoring, threat vector classification, and automated desk alerting."
+        "MCP server exposing multi-agent sovereign risk evaluation for "
+        "Google Cloud Agent Builder integration."
     ),
 )
 mcp.mount()
