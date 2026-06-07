@@ -17,10 +17,10 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Application source
-COPY app.py main.py ui.py ./
+COPY app.py main.py ./
 
 EXPOSE 8080
 
-# Serve the FastAPI backend. The Streamlit UI (ui.py) is run separately:
-#   streamlit run ui.py
+# Serve the FastAPI backend. The Next.js dashboard (frontend/) is deployed
+# separately and talks to this API over HTTP.
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]

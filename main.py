@@ -1,9 +1,10 @@
 import asyncio
+import json
 import logging
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Callable, Optional
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -14,6 +15,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi_mcp import FastApiMCP
+from sse_starlette.sse import EventSourceResponse
 from google import genai
 from google.genai import types
 from mcp import ClientSession, StdioServerParameters
@@ -41,7 +43,7 @@ genai_client = genai.Client(
     location=os.environ.get("GOOGLE_CLOUD_LOCATION", "global"),
 )
 
-GEMINI_MODEL = "gemini-2.5-pro"
+GEMINI_MODEL = "gemini-2.5-flash"
 
 # ---------------------------------------------------------------------------
 # Agent personas
@@ -344,6 +346,7 @@ async def _run_agent1_auditor(
     narrative: str,
     context: Optional[str],
     max_turns: int = 2,
+    on_event: Optional[Callable[[str, dict], Any]] = None,
 ) -> tuple[str, str]:
     """
     Agent 1 — Fact Auditor.
@@ -354,8 +357,12 @@ async def _run_agent1_auditor(
 
     Returns: (audit_findings_text, combined_grounding_docs)
     """
-    # Prompt instructs Gemini to produce the audit IN its final response,
-    # so we avoid an extra round-trip after the tool loop.
+    async def emit(evt: str, data: dict) -> None:
+        if on_event:
+            await on_event(evt, data)
+
+    await emit("agent1_start", {"message": "Fact Auditor initializing..."})
+
     prompt = (
         f"NARRATIVE TO AUDIT:\n{narrative}"
         + (f"\n\nCONTEXT: {context}" if context else "")
@@ -370,6 +377,7 @@ async def _run_agent1_auditor(
     inline_audit = ""  # captured directly from the loop's final turn
 
     for turn in range(max_turns):
+        await emit("agent1_thinking", {"turn": turn + 1, "message": f"Analyzing narrative (pass {turn + 1})..."})
         response = await genai_client.aio.models.generate_content(
             model=GEMINI_MODEL,
             contents=contents,
@@ -386,14 +394,17 @@ async def _run_agent1_auditor(
             # Model finished — its text IS the audit report
             inline_audit = "\n".join(text_parts).strip()
             logger.info("Auditor produced inline audit | turns=%d | chars=%d", turn + 1, len(inline_audit))
+            await emit("agent1_complete", {"chars": len(inline_audit), "message": "Audit report generated"})
             break
 
         contents.append(candidate.content)
         fn_parts: list[types.Part] = []
         for fc in fn_calls:
             if fc.name == "search_macro_data":
-                logger.info("Agent1 → search_macro_data | query=%r", fc.args.get("query"))
-                result = await app_module.search_macro_data(fc.args["query"])
+                query = fc.args.get("query", "")
+                logger.info("Agent1 → search_macro_data | query=%r", query)
+                await emit("agent1_search", {"query": query})
+                result = await app_module.search_macro_data(query)
                 grounding_chunks.append(result)
                 fn_parts.append(
                     types.Part(
@@ -426,9 +437,9 @@ async def _run_agent1_auditor(
             config=types.GenerateContentConfig(system_instruction=AUDITOR_PERSONA),
         )
         audit_text = getattr(fallback, "text", "") or ""
+        await emit("agent1_complete", {"chars": len(audit_text), "message": "Audit report generated (fallback)"})
+
     combined_grounding = "\n\n===\n\n".join(grounding_chunks) if grounding_chunks else ""
-    # Cap grounding size to avoid token overflow when PDFs are very large.
-    # Agent 2 receives this text alongside the full audit and narrative.
     if len(combined_grounding) > 12_000:
         combined_grounding = combined_grounding[:12_000] + "\n\n[... grounding truncated for context limits ...]"
     return audit_text, combined_grounding
@@ -439,6 +450,7 @@ async def _run_agent2_specialist(
     context: Optional[str],
     audit_findings: str,
     grounding_docs: str,
+    on_event: Optional[Callable[[str, dict], Any]] = None,
 ) -> _SpecialistOutput:
     """
     Agent 2 — Sovereign Risk Specialist.
@@ -446,6 +458,12 @@ async def _run_agent2_specialist(
     Synthesises the original narrative, the Auditor's findings, and the raw
     grounding documents into a structured sovereign risk assessment.
     """
+    async def emit(evt: str, data: dict) -> None:
+        if on_event:
+            await on_event(evt, data)
+
+    await emit("agent2_start", {"message": "Risk Specialist synthesizing narrative + audit + grounding docs..."})
+
     prompt = "\n\n".join(filter(None, [
         f"ORIGINAL NARRATIVE:\n{narrative}",
         f"CONTEXT: {context}" if context else None,
@@ -458,6 +476,7 @@ async def _run_agent2_specialist(
     ]))
 
     try:
+        await emit("cross_check", {"message": "Cross-checking audit ↔ narrative consistency..."})
         response = await genai_client.aio.models.generate_content(
             model=GEMINI_MODEL,
             contents=prompt,
@@ -467,9 +486,14 @@ async def _run_agent2_specialist(
                 response_schema=_SpecialistOutput,
             ),
         )
-        if getattr(response, "parsed", None) is not None:
-            return response.parsed
-        return _SpecialistOutput.model_validate_json(response.text)
+        result = response.parsed if getattr(response, "parsed", None) is not None else _SpecialistOutput.model_validate_json(response.text)
+        await emit("agent2_complete", {
+            "score": result.sovereign_risk_score,
+            "threat": result.primary_threat_vector,
+            "alert": result.requires_immediate_alert,
+            "message": f"Score computed: {result.sovereign_risk_score:.1f}/10",
+        })
+        return result
     except Exception as exc:
         logger.error("Agent 2 structured output failed: %s", exc)
         raise HTTPException(status_code=502, detail=f"Specialist agent failure: {exc}")
@@ -580,6 +604,107 @@ async def evaluate_v1(request: EvaluationRequest) -> EvaluationResponse:
 )
 async def evaluate_risk_legacy(request: EvaluationRequest) -> EvaluationResponse:
     return await _orchestrate(request)
+
+
+# ---------------------------------------------------------------------------
+# Streaming SSE endpoint — real-time agent step events
+# ---------------------------------------------------------------------------
+
+async def _orchestrate_streaming(
+    request: EvaluationRequest,
+    on_event: Callable[[str, dict], Any],
+) -> EvaluationResponse:
+    """Run the two-agent pipeline, firing on_event callbacks at each step."""
+    try:
+        audit_findings, grounding_docs = await _run_agent1_auditor(
+            request.narrative, request.context, on_event=on_event
+        )
+    except Exception as exc:
+        logger.error("Agent 1 (Fact Auditor) failed: %s", exc)
+        await on_event("error", {"message": f"Fact Auditor failed: {exc}"})
+        raise HTTPException(status_code=502, detail=f"Fact Auditor agent failure: {exc}")
+    logger.info("Auditor complete | audit_chars=%d", len(audit_findings))
+
+    specialist_output = await _run_agent2_specialist(
+        request.narrative, request.context, audit_findings, grounding_docs,
+        on_event=on_event,
+    )
+    logger.info(
+        "Specialist complete | score=%.2f | threat=%r",
+        specialist_output.sovereign_risk_score,
+        specialist_output.primary_threat_vector,
+    )
+
+    alert_flag = specialist_output.requires_immediate_alert and specialist_output.sovereign_risk_score >= 5.0
+
+    assessment = SovereignRiskAssessment(
+        sovereign_risk_score=specialist_output.sovereign_risk_score,
+        primary_threat_vector=specialist_output.primary_threat_vector,
+        audit_findings=audit_findings,
+        impact_assessment=specialist_output.impact_assessment,
+        requires_immediate_alert=alert_flag,
+    )
+
+    alert_dispatched = False
+    if assessment.sovereign_risk_score >= 7.5 or assessment.requires_immediate_alert:
+        _fire_and_forget(trigger_trading_desk_webhook(assessment.model_dump()))
+        alert_dispatched = True
+        logger.info(
+            "Alert queued | score=%.2f | immediate=%s",
+            assessment.sovereign_risk_score,
+            assessment.requires_immediate_alert,
+        )
+
+    result = EvaluationResponse(
+        assessment=assessment,
+        model_used=GEMINI_MODEL,
+        evaluation_timestamp=datetime.now(timezone.utc).isoformat(),
+        alert_dispatched=alert_dispatched,
+    )
+    await on_event("complete", result.model_dump())
+    return result
+
+
+@app.post(
+    "/api/v1/evaluate/stream",
+    operation_id="evaluate_sovereign_risk_stream",
+    summary="Multi-Agent Sovereign Risk Evaluation (SSE stream)",
+    description=(
+        "Streaming variant of /api/v1/evaluate. Yields Server-Sent Events for each "
+        "agent step (agent1_start, agent1_search, agent1_complete, agent2_start, "
+        "cross_check, agent2_complete, complete). Final 'complete' event carries the "
+        "full EvaluationResponse JSON."
+    ),
+    tags=["Risk Intelligence"],
+)
+async def evaluate_stream(request: EvaluationRequest):
+    queue: asyncio.Queue = asyncio.Queue()
+
+    async def on_event(event_type: str, data: dict) -> None:
+        await queue.put((event_type, data))
+
+    async def run_pipeline() -> None:
+        try:
+            await _orchestrate_streaming(request, on_event)
+        except Exception as exc:
+            await queue.put(("error", {"message": str(exc)}))
+        finally:
+            await queue.put(None)  # sentinel
+
+    task = asyncio.create_task(run_pipeline())
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+    async def event_generator():
+        while True:
+            item = await queue.get()
+            if item is None:
+                break
+            event_type, data = item
+            yield {"event": event_type, "data": json.dumps(data)}
+
+    return EventSourceResponse(event_generator())
+
 
 # ---------------------------------------------------------------------------
 # MCP Server — mount AFTER all routes are registered

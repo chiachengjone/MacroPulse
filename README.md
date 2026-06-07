@@ -44,10 +44,10 @@ The platform is built on **Google Cloud's Vertex AI** (Gemini 2.5 Flash) and **E
 │  (Narrative + Context)                                          │
 │        │                                                        │
 │        ▼                                                        │
-│  ┌─────────────┐    Streamlit UI    ┌────────────────────────┐  │
-│  │   ui.py     │ ──────────────────▶│  POST /api/v1/evaluate │  │
-│  │  (C2 Panel) │                    └───────────┬────────────┘  │
-│  └─────────────┘                               │                │
+│  ┌─────────────┐   SSE stream API   ┌────────────────────────┐  │
+│  │  frontend/  │ ──────────────────▶│ POST /api/v1/evaluate  │  │
+│  │  (Next.js)  │ ◀──────────────────│        /stream         │  │
+│  └─────────────┘   live pipeline    └───────────┬────────────┘  │
 │                                                ▼                │
 │                          ┌─────────────────────────────────┐    │
 │                          │   AGENT 1 — Fact Auditor        │    │
@@ -103,7 +103,7 @@ The platform is built on **Google Cloud's Vertex AI** (Gemini 2.5 Flash) and **E
 | **MCP Integration** | Official Elastic MCP server (`docker.elastic.co/mcp/elasticsearch`) |
 | **Retrieval** | Hybrid RRF: `multi_match` (BM25) + kNN (`.multilingual-e5-small`) |
 | **API Framework** | FastAPI + `fastapi-mcp` (exposes own MCP server at `/mcp`) |
-| **UI** | Streamlit split-panel dashboard |
+| **UI** | Next.js 15 (App Router) + React 19 + Tailwind CSS — live SSE pipeline dashboard |
 | **Deployment** | Google Cloud Run (serverless containers) |
 | **Container** | Python 3.11-slim + bundled Elastic MCP binary (multi-stage Docker) |
 
@@ -135,8 +135,8 @@ Automatically falls back to a high-fidelity keyword `multi_match` if the vector 
 ### 3. MCP Dual Role
 MacroPulse both **consumes** Elastic's MCP server (for knowledge retrieval) and **exposes** its own MCP server at `/mcp` via `fastapi-mcp`, making all API endpoints discoverable as tools for Google Cloud Agent Builder.
 
-### 4. Streamlit Command & Control UI
-`ui.py` — split-panel dashboard with pre-populated demo scenario, real-time risk gauge, expandable auditor report, and alert badge.
+### 4. Next.js Live Pipeline Dashboard
+`frontend/` — a Next.js 15 + React 19 dashboard that streams the two-agent pipeline in real time over Server-Sent Events (`POST /api/v1/evaluate/stream`). Users enter their own narrative (or pick an example), then watch each step appear live — auditor reasoning, Elasticsearch search queries, cross-check, and the final risk score, threat vector, and impact assessment.
 
 ### 5. Async Trading Desk Alerts
 Fire-and-forget webhook dispatch when `sovereign_risk_score ≥ 7.5` or `requires_immediate_alert = true`, with severity tiers (CRITICAL / HIGH / MEDIUM / LOW) and SLA windows.
@@ -148,8 +148,11 @@ Fire-and-forget webhook dispatch when `sovereign_risk_score ≥ 7.5` or `require
 ```
 MacroPulse/
 ├── app.py              # Elastic MCP client + hybrid search tool (FastMCP server)
-├── main.py             # FastAPI server, two-agent orchestration, MCP mount
-├── ui.py               # Streamlit Command & Control dashboard
+├── main.py             # FastAPI server, two-agent orchestration, SSE stream, MCP mount
+├── frontend/           # Next.js 15 dashboard (live SSE pipeline UI)
+│   ├── app/            # App Router pages + client dashboard
+│   ├── components/     # Chat input, pipeline feed, risk results
+│   └── lib/            # SSE client hook, types, helpers
 ├── Dockerfile          # Multi-stage: bundles Elastic MCP binary into Python image
 ├── requirements.txt    # Pinned Python dependencies
 ├── .env.example        # Template for required environment variables
@@ -194,13 +197,15 @@ python -m uvicorn main:app --reload --port 8080
 
 Server starts at `http://localhost:8080`. Swagger UI at `http://localhost:8080/docs`.
 
-### 4. Run the Streamlit UI (separate terminal)
+### 4. Run the Next.js dashboard (separate terminal)
 
 ```bash
-streamlit run ui.py
+cd frontend
+npm install
+npm run dev
 ```
 
-Opens at `http://localhost:8501`. The default host URL points to the deployed Cloud Run instance; change it to `http://localhost:8080` to hit your local server.
+Opens at `http://localhost:3000`. By default `frontend/.env.local` points `NEXT_PUBLIC_API_URL` at the deployed Cloud Run instance; set it to `http://localhost:8080` to hit your local server.
 
 ---
 
@@ -233,6 +238,10 @@ Primary endpoint. Runs the full two-agent cascade.
   "alert_dispatched": true
 }
 ```
+
+### `POST /api/v1/evaluate/stream`
+
+Streaming variant of `/api/v1/evaluate`. Returns a Server-Sent Events stream, emitting one event per pipeline step (`agent1_start`, `agent1_thinking`, `agent1_search`, `agent1_complete`, `agent2_start`, `cross_check`, `agent2_complete`) before a final `complete` event carrying the full `EvaluationResponse` JSON. This powers the live pipeline feed in the Next.js dashboard.
 
 ### `GET /health`
 

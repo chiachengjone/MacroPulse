@@ -1,0 +1,17 @@
+# Keep Cloud Build upload small — only the backend is deployed here.
+.git/
+.gitignore
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.DS_Store
+.env
+.vscode/
+
+# The Next.js frontend is deployed separately, not in this image.
+frontend/
+
+# Docs / local-only
+README.md
+LICENSE
