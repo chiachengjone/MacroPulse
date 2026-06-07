@@ -16,7 +16,11 @@ _call_elastic_tool: Optional[Callable[..., Any]] = None
 # Embedding configuration for Elasticsearch Serverless kNN retriever.
 # .multilingual-e5-small is the default bundled E5 model on Elastic Serverless.
 _VECTOR_FIELD = "attachment.content_embedding"
-_EMBEDDING_MODEL = ".multilingual-e5-small"
+_EMBEDDING_MODEL = ".multilingual-e5-small-elasticsearch"
+
+# Set to True after the first failed RRF attempt so subsequent calls skip
+# straight to keyword search rather than retrying a known-missing vector index.
+_rrf_unavailable: bool = False
 
 
 def _parse_hits(raw_text: str) -> list[dict]:
@@ -117,19 +121,23 @@ async def search_macro_data(query: str) -> str:
         "size": 5,
     }
 
-    try:
-        result = await _call_elastic_tool(
-            "search", {"index": INDEX_NAME, "query_body": rrf_body}
-        )
-        formatted = _format_tool_result(result)
-        if "No relevant documents found" not in formatted:
-            logger.info("Hybrid RRF search succeeded | query=%r", query)
-            return formatted
-        logger.debug("RRF returned no hits — trying keyword fallback")
-    except Exception as exc:
-        logger.warning(
-            "Hybrid RRF search failed (%s) — falling back to keyword search", exc
-        )
+    if not _rrf_unavailable:
+        try:
+            result = await _call_elastic_tool(
+                "search", {"index": INDEX_NAME, "query_body": rrf_body}
+            )
+            formatted = _format_tool_result(result)
+            if "No relevant documents found" not in formatted:
+                logger.info("Hybrid RRF search succeeded | query=%r", query)
+                return formatted
+            logger.debug("RRF returned no hits — trying keyword fallback")
+        except Exception as exc:
+            global _rrf_unavailable
+            _rrf_unavailable = True
+            logger.warning(
+                "Hybrid RRF unavailable (%s) — switching to keyword search for this session",
+                exc,
+            )
 
     # ── Strategy 2: Keyword multi_match fallback ─────────────────────────
     keyword_body = {

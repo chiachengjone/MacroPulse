@@ -333,26 +333,31 @@ async def trigger_trading_desk_webhook(ticket: dict) -> None:
 async def _run_agent1_auditor(
     narrative: str,
     context: Optional[str],
-    max_turns: int = 4,
+    max_turns: int = 2,
 ) -> tuple[str, str]:
     """
     Agent 1 — Fact Auditor.
 
-    Uses the Elastic MCP search tool to gather grounding documents, then
-    produces a structured audit report identifying data gaps, inflations,
-    and factual errors in the narrative.
+    Runs a tool-calling loop (≤ max_turns) where Gemini searches Elasticsearch
+    for grounding documents. When the model stops calling tools its final text
+    response IS the structured audit — no separate extraction call needed.
 
     Returns: (audit_findings_text, combined_grounding_docs)
     """
+    # Prompt instructs Gemini to produce the audit IN its final response,
+    # so we avoid an extra round-trip after the tool loop.
     prompt = (
         f"NARRATIVE TO AUDIT:\n{narrative}"
         + (f"\n\nCONTEXT: {context}" if context else "")
-        + "\n\nUse search_macro_data to retrieve supporting documents, then write "
-          "a structured fact-audit identifying: DATA GAPS, INFLATIONS, ERRORS."
+        + "\n\nInstructions: Call search_macro_data once or twice with targeted keywords "
+          "to retrieve relevant institutional research. Then, IN THIS SAME RESPONSE after "
+          "your searches, write your complete fact-audit report with clear sections: "
+          "DATA GAPS, INFLATIONS, ERRORS, and ACCURACY RATING (0-10). Cite the retrieved documents."
     )
 
     contents: list = [types.Content(role="user", parts=[types.Part(text=prompt)])]
     grounding_chunks: list[str] = []
+    inline_audit = ""  # captured directly from the loop's final turn
 
     for turn in range(max_turns):
         response = await genai_client.aio.models.generate_content(
@@ -365,9 +370,12 @@ async def _run_agent1_auditor(
         )
         candidate = response.candidates[0]
         fn_calls = [p.function_call for p in candidate.content.parts if p.function_call]
+        text_parts = [p.text for p in candidate.content.parts if getattr(p, "text", None)]
 
         if not fn_calls:
-            logger.info("Auditor search loop done | turns=%d", turn + 1)
+            # Model finished — its text IS the audit report
+            inline_audit = "\n".join(text_parts).strip()
+            logger.info("Auditor produced inline audit | turns=%d | chars=%d", turn + 1, len(inline_audit))
             break
 
         contents.append(candidate.content)
@@ -386,27 +394,28 @@ async def _run_agent1_auditor(
                 )
         contents.append(types.Content(role="user", parts=fn_parts))
     else:
-        logger.warning("Auditor loop hit MAX_TURNS=%d", max_turns)
+        logger.warning("Auditor loop hit MAX_TURNS=%d without producing audit text", max_turns)
 
-    # Force audit report extraction
-    contents.append(
-        types.Content(
-            role="user",
-            parts=[types.Part(
-                text=(
-                    "Now write your complete fact-audit report. Structure it with clear "
-                    "sections: DATA GAPS, INFLATIONS, ERRORS, and an overall ACCURACY RATING (0-10). "
-                    "Be specific and cite the retrieved documents."
-                )
-            )],
+    if inline_audit:
+        audit_text = inline_audit
+    else:
+        # Fallback: model hit max_turns without writing the audit — force one extraction call
+        logger.info("Auditor falling back to explicit extraction call")
+        contents.append(
+            types.Content(
+                role="user",
+                parts=[types.Part(text=(
+                    "Now write your complete fact-audit report: DATA GAPS, INFLATIONS, "
+                    "ERRORS, ACCURACY RATING (0-10). Cite the retrieved documents."
+                ))],
+            )
         )
-    )
-    audit_response = await genai_client.aio.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=contents,
-        config=types.GenerateContentConfig(system_instruction=AUDITOR_PERSONA),
-    )
-    audit_text = getattr(audit_response, "text", "") or ""
+        fallback = await genai_client.aio.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=contents,
+            config=types.GenerateContentConfig(system_instruction=AUDITOR_PERSONA),
+        )
+        audit_text = getattr(fallback, "text", "") or ""
     combined_grounding = "\n\n===\n\n".join(grounding_chunks) if grounding_chunks else ""
     return audit_text, combined_grounding
 
