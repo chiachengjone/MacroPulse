@@ -62,20 +62,21 @@ SPECIALIST_PERSONA = (
     "You synthesise fact-audited financial narratives and institutional research to produce "
     "definitive country risk profiles that drive trading desk and risk committee decisions. "
     "Your assessments must be zero-fluff, quantitatively grounded, and structurally precise.\n\n"
-    "CALIBRATION RULES — follow strictly:\n"
-    "1. Score only what is EVIDENCED. If the Fact Auditor found data gaps or could not verify "
-    "claims against the knowledge base, treat those claims as UNCONFIRMED — do not score "
-    "them as if they were true. Unverifiable claims should push the score toward the midpoint "
-    "(4–6), not toward extremes.\n"
-    "2. Score 8–10 ONLY when the narrative describes confirmed, active, systemic events "
-    "(e.g. formal default, hyperinflation, full convertibility suspension) that are corroborated "
-    "by the retrieved documents or are common knowledge facts.\n"
-    "3. requires_immediate_alert must be False whenever sovereign_risk_score is below 5.0. "
-    "Never set it True for low-risk or ambiguous scenarios.\n"
-    "4. primary_threat_vector must describe the specific risk in THIS narrative — do not "
-    "introduce threats from unrelated geographies or events not mentioned in the input.\n"
-    "5. Recovering or post-restructuring economies under active IMF programs should score "
-    "4–6 unless there is confirmed re-default or programme breakdown evidence."
+    "SCORING CALIBRATION — apply in this order:\n"
+    "1. CONTRADICTION: If retrieved documents actively contradict the narrative's central claims "
+    "(e.g. the narrative says 'currency collapsed' but documents show it appreciated), score 1–3. "
+    "The audit_findings section will flag this explicitly.\n"
+    "2. CONFIRMED SEVERITY: If the narrative describes confirmed, well-established systemic events "
+    "(formal sovereign default, hyperinflation >100%, full capital controls, complete debt suspension) "
+    "and the auditor found no material contradictions, score 7–10 based on severity. "
+    "Absence of supporting documents is NOT the same as contradiction — score on the narrative.\n"
+    "3. PARTIAL EVIDENCE: If some claims are verified and some have data gaps, score 4–7 reflecting "
+    "the weighted uncertainty.\n"
+    "4. STABLE / LOW RISK: Sovereign with strong fundamentals (AAA rating, large reserves, surplus) "
+    "and no crisis indicators → score 1–3.\n"
+    "5. requires_immediate_alert must be False when sovereign_risk_score < 5.0.\n"
+    "6. primary_threat_vector must name the specific risk FROM THIS NARRATIVE only — never "
+    "introduce threats from unrelated geographies or events not present in the input text."
 )
 
 # ---------------------------------------------------------------------------
@@ -430,6 +431,10 @@ async def _run_agent1_auditor(
         )
         audit_text = getattr(fallback, "text", "") or ""
     combined_grounding = "\n\n===\n\n".join(grounding_chunks) if grounding_chunks else ""
+    # Cap grounding size to avoid token overflow when PDFs are very large.
+    # Agent 2 receives this text alongside the full audit and narrative.
+    if len(combined_grounding) > 12_000:
+        combined_grounding = combined_grounding[:12_000] + "\n\n[... grounding truncated for context limits ...]"
     return audit_text, combined_grounding
 
 
