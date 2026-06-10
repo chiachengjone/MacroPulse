@@ -1,5 +1,5 @@
 export type PipelineAgent = "agent1" | "crosscheck" | "agent2";
-export type StepKind = "normal" | "search" | "complete" | "score";
+export type StepKind = "normal" | "search" | "complete" | "score" | "source";
 
 export interface PipelineStep {
   agent: PipelineAgent;
@@ -8,12 +8,18 @@ export interface PipelineStep {
   score?: number;
 }
 
+export type GroundingStrength = "STRONG" | "PARTIAL" | "LIMITED";
+
 export interface SovereignRiskAssessment {
+  raw_narrative_score: number;
   sovereign_risk_score: number;
   primary_threat_vector: string;
   audit_findings: string;
   impact_assessment: string;
   requires_immediate_alert: boolean;
+  grounding_strength: GroundingStrength;
+  grounding_note: string;
+  sources: string[];
 }
 
 export interface EvaluationResponse {

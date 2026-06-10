@@ -5,10 +5,12 @@
 > Submitted to the [Google Cloud Rapid Agent Hackathon 2026](https://rapid-agent.devpost.com) — **Elastic Track**
 > Built by a NUS Business Analytics student
 
-[![Live Demo](https://img.shields.io/badge/Live%20Demo-Cloud%20Run-4285F4?logo=googlecloud)](https://macropulse-270431042772.us-central1.run.app)
+[![Live Dashboard](https://img.shields.io/badge/Live%20Dashboard-Cloud%20Run-4285F4?logo=googlecloud)](https://macropulse-dashboard-270431042772.us-central1.run.app)
 [![API Docs](https://img.shields.io/badge/API%20Docs-Swagger-85EA2D?logo=swagger)](https://macropulse-270431042772.us-central1.run.app/docs)
 [![MCP Server](https://img.shields.io/badge/MCP%20Server-%2Fmcp-orange)](https://macropulse-270431042772.us-central1.run.app/mcp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+**▶ Try it live: [macropulse-dashboard-270431042772.us-central1.run.app](https://macropulse-dashboard-270431042772.us-central1.run.app)**
 
 ---
 
@@ -26,6 +28,7 @@ The platform is built on **Google Cloud's Vertex AI** (Gemini 2.5 Flash) and **E
 
 | Resource | URL |
 |---|---|
+| **Dashboard (Cloud Run)** | `https://macropulse-dashboard-270431042772.us-central1.run.app` |
 | API (Cloud Run) | `https://macropulse-270431042772.us-central1.run.app` |
 | Health check | `https://macropulse-270431042772.us-central1.run.app/health` |
 | Swagger UI | `https://macropulse-270431042772.us-central1.run.app/docs` |
@@ -126,19 +129,30 @@ Automatically falls back to a high-fidelity keyword `multi_match` if the vector 
 **Agent 1 — Fact Auditor**: Uses Gemini's function-calling to iteratively retrieve documents from Elasticsearch, then writes a structured audit identifying DATA GAPS, INFLATIONS, and ERRORS in the input narrative.
 
 **Agent 2 — Sovereign Risk Specialist**: Receives the narrative, the Auditor's full report, and the raw grounding documents. Produces a `SovereignRiskAssessment` with:
-- `sovereign_risk_score` (0.0 – 10.0)
+- `raw_narrative_score` (0.0 – 10.0) — risk if the narrative is taken at face value (pre-audit)
+- `sovereign_risk_score` (0.0 – 10.0) — the audit-**adjusted** final score
 - `primary_threat_vector`
 - `audit_findings` (from Agent 1)
 - `impact_assessment`
 - `requires_immediate_alert` (bool)
+- `grounding_strength` (`STRONG` / `PARTIAL` / `LIMITED`) + `grounding_note`
+- `sources` — titles of the knowledge-base documents that grounded the assessment
 
-### 3. MCP Dual Role
+### 3. Grounding Transparency (calibrated confidence)
+`main.py` — Agent 2 judges how well the retrieved corpus actually grounds *this specific* narrative and emits a tier:
+- **STRONG** — entity-specific evidence found (e.g. an IMF Article IV for the exact country, or that central bank's report)
+- **PARTIAL** — only general macro/sovereign-risk research; the score rests on the narrative, not corroborating evidence
+- **LIMITED** — retrieved documents are off-topic or absent (e.g. an out-of-domain prompt)
+
+The dashboard surfaces this as a coloured badge + one-line rationale + a list of the cited source documents. Instead of silently degrading on unfamiliar inputs, the system **states how confident it is** — and the `raw → adjusted` score delta makes the two-agent correction visible.
+
+### 4. MCP Dual Role
 MacroPulse both **consumes** Elastic's MCP server (for knowledge retrieval) and **exposes** its own MCP server at `/mcp` via `fastapi-mcp`, making all API endpoints discoverable as tools for Google Cloud Agent Builder.
 
-### 4. Next.js Live Pipeline Dashboard
-`frontend/` — a Next.js 15 + React 19 dashboard that streams the two-agent pipeline in real time over Server-Sent Events (`POST /api/v1/evaluate/stream`). Users enter their own narrative (or pick an example), then watch each step appear live — auditor reasoning, Elasticsearch search queries, cross-check, and the final risk score, threat vector, and impact assessment.
+### 5. Next.js Live Pipeline Dashboard
+`frontend/` — a Next.js 15 + React 19 dashboard that streams the two-agent pipeline in real time over Server-Sent Events (`POST /api/v1/evaluate/stream`). Users enter their own narrative (or pick an example), then watch each step appear live — auditor reasoning, Elasticsearch search queries, retrieved sources, the grounding verdict, and the final risk score, threat vector, and impact assessment.
 
-### 5. Async Trading Desk Alerts
+### 6. Async Trading Desk Alerts
 Fire-and-forget webhook dispatch when `sovereign_risk_score ≥ 7.5` or `requires_immediate_alert = true`, with severity tiers (CRITICAL / HIGH / MEDIUM / LOW) and SLA windows.
 
 ---
@@ -153,6 +167,7 @@ MacroPulse/
 │   ├── app/            # App Router pages + client dashboard
 │   ├── components/     # Chat input, pipeline feed, risk results
 │   └── lib/            # SSE client hook, types, helpers
+├── ingest.py           # Bulk PDF → Elasticsearch loader (Tika extract + e5 embeddings)
 ├── Dockerfile          # Multi-stage: bundles Elastic MCP binary into Python image
 ├── requirements.txt    # Pinned Python dependencies
 ├── .env.example        # Template for required environment variables
@@ -227,11 +242,18 @@ Primary endpoint. Runs the full two-agent cascade.
 ```json
 {
   "assessment": {
+    "raw_narrative_score": 9.0,
     "sovereign_risk_score": 8.5,
     "primary_threat_vector": "Sovereign Default Risk",
     "audit_findings": "DATA GAPS: ...\nINFLATIONS: ...\nERRORS: ...",
     "impact_assessment": "The suspension of debt payments transmits via...",
-    "requires_immediate_alert": true
+    "requires_immediate_alert": true,
+    "grounding_strength": "STRONG",
+    "grounding_note": "Corroborated by the IMF Article IV consultation and BIS Quarterly Review for the region.",
+    "sources": [
+      "IMF Argentina 2026 Article IV Consultation + 2nd EFF Review",
+      "BIS Quarterly Review (issue 2603)"
+    ]
   },
   "model_used": "gemini-2.5-flash",
   "evaluation_timestamp": "2026-06-07T10:21:49.708179+00:00",
@@ -292,6 +314,23 @@ TRADING_DESK_WEBHOOK_URL=https://httpbin.org/post"
 ```
 
 > The Dockerfile uses a multi-stage build to copy the AMD64 Elastic MCP binary from `docker.elastic.co/mcp/elasticsearch` into the Python image. No separate Elastic MCP service is needed on Cloud Run.
+
+### Deploying the dashboard (frontend)
+
+The Next.js dashboard deploys as a separate Cloud Run service using its own multi-stage Dockerfile (`frontend/Dockerfile`, standalone output):
+
+```bash
+cd frontend
+gcloud run deploy macropulse-dashboard \
+  --source . \
+  --platform managed \
+  --region us-central1 \
+  --allow-unauthenticated \
+  --port 8080 \
+  --memory 512Mi
+```
+
+> `NEXT_PUBLIC_API_URL` is baked into the bundle at build time (set in `frontend/Dockerfile`). The backend's CORS policy (`allow_origins=["*"]`) permits the dashboard's cross-origin calls.
 
 ---
 
@@ -370,6 +409,24 @@ Context: Sovereign default, EM credit
 ```
 *(The knowledge base contains BIS Quarterly Reviews showing Latin American currencies
 outperforming in 2025-2026, so the Auditor will flag this as contradicted by evidence.)*
+
+**Inflated narrative → strong audit correction (Singapore):**
+```
+Narrative: Singapore's banks are reportedly carrying dangerous exposure to distressed
+Chinese property developers as home prices crater and the SGD slides, with speculation
+MAS will abandon its exchange-rate framework amid capital flight.
+Context: Banking stability, property, SGD, MAS policy
+```
+*(Grounded by MAS Financial Stability Reviews and the IMF Singapore Article IV — the
+Auditor flags the alarmist framing as contradicted, producing a large `raw → adjusted`
+score drop with **STRONG** grounding.)*
+
+> **Knowledge base.** The corpus is institutional macro research — BIS Quarterly Reviews
+> & Annual Economic Reports, IMF WEO / GFSR / Fiscal Monitor & country Article IVs
+> (Türkiye, Argentina, Egypt, Pakistan, Singapore + Asia-Pacific), World Bank GEP, OECD,
+> and NBER working papers on sovereign default & currency crises. It is loaded into the
+> `macro-pulse-files` index by [`ingest.py`](ingest.py) (Apache Tika text extraction +
+> `.multilingual-e5-small` embeddings via an Elasticsearch ingest pipeline).
 
 ---
 

@@ -15,3 +15,7 @@ frontend/
 # Docs / local-only
 README.md
 LICENSE
+
+# Local-only knowledge-base ingestion (not needed in the runtime image)
+knowledge_base/
+ingest.py

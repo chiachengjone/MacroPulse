@@ -13,6 +13,8 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 # NEXT_PUBLIC_* values are inlined at build time. This is the public backend URL.
 ENV NEXT_PUBLIC_API_URL=https://macropulse-270431042772.us-central1.run.app
+# Emit .next/standalone bundle needed for the minimal runtime stage below.
+ENV BUILD_STANDALONE=true
 RUN npm run build
 
 # ---- runner: minimal runtime image ----

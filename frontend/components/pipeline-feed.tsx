@@ -133,6 +133,15 @@ function StepLine({ step }: { step: PipelineStep }) {
     );
   }
 
+  if (step.kind === "source") {
+    return (
+      <div className="flex items-start gap-2.5 pl-3.5">
+        <span className="text-neutral-700 select-none flex-shrink-0 text-[0.7rem]">└</span>
+        <span className="text-neutral-600 text-[0.72rem] italic truncate">{step.text}</span>
+      </div>
+    );
+  }
+
   if (step.kind === "complete") {
     return (
       <div className="flex items-start gap-2.5">

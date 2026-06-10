@@ -25,20 +25,40 @@ _rrf_unavailable: bool = False
 
 def _parse_hits(raw_text: str) -> list[dict]:
     """
-    Best-effort parse of the Elastic MCP tool's text output.
-    The server serialises the ES _search response; extract hits if possible.
+    Best-effort parse of the Elastic MCP tool's text output into hit dicts
+    of the form {"_source": {...}}.
+
+    The official Elastic MCP `search` tool returns a JSON ARRAY of _source
+    documents (e.g. [{"attachment": {...}}, ...]), while a raw ES response uses
+    the {"hits": {"hits": [...]}} envelope. Handle both.
     """
     try:
         data = json.loads(raw_text)
-        return data.get("hits", {}).get("hits", [])
-    except (json.JSONDecodeError, AttributeError):
+    except (json.JSONDecodeError, TypeError):
         return []
 
+    if isinstance(data, dict):
+        return data.get("hits", {}).get("hits", [])
+    if isinstance(data, list):
+        # Each element is a bare _source document — wrap to a uniform hit shape.
+        return [
+            elem if (isinstance(elem, dict) and "_source" in elem) else {"_source": elem}
+            for elem in data
+            if isinstance(elem, dict)
+        ]
+    return []
 
-def _format_tool_result(result: Any) -> str:
-    """Normalise an MCP call_tool result into cited document chunks."""
+
+def _format_tool_result(result: Any) -> tuple[str, list[str]]:
+    """
+    Normalise an MCP call_tool result into cited document chunks.
+
+    Returns (formatted_text, source_titles) — the titles let the orchestrator
+    surface which documents grounded the analysis and judge grounding strength.
+    """
     items = result if isinstance(result, list) else getattr(result, "content", [])
-    chunks = []
+    chunks: list[str] = []
+    titles: list[str] = []
 
     for item in items:
         if not (hasattr(item, "text") and item.text):
@@ -57,17 +77,18 @@ def _format_tool_result(result: Any) -> str:
                     chunks.append(
                         f"[Doc {i} | score={score} | source: {title}]\n{content}"
                     )
+                    titles.append(title)
         else:
             # Plain-text fallback (server already formatted the response)
             chunks.append(item.text.strip())
 
-    return "\n\n---\n\n".join(chunks) if chunks else "No relevant documents found."
+    text = "\n\n---\n\n".join(chunks) if chunks else "No relevant documents found."
+    return text, titles
 
 
-@mcp.tool()
-async def search_macro_data(query: str) -> str:
+async def _search_with_sources(query: str) -> tuple[str, list[str]]:
     """
-    Search the MacroPulse macro-economic knowledge base using hybrid retrieval.
+    Hybrid retrieval against the knowledge base.
 
     Strategy:
       1. Attempt Elasticsearch RRF (Reciprocal Rank Fusion) combining a text
@@ -76,12 +97,12 @@ async def search_macro_data(query: str) -> str:
       2. If the vector configuration is absent or returns an error, fall back
          to a high-fidelity keyword multi_match boosting title and content.
 
-    Returns top document chunks with source citations and relevance metadata.
+    Returns (formatted_text, source_titles).
     """
     global _rrf_unavailable  # must be declared before any read or write of the flag
 
     if _call_elastic_tool is None:
-        return "Elastic MCP session not initialised — server is starting up."
+        return "Elastic MCP session not initialised — server is starting up.", []
 
     # ── Strategy 1: RRF hybrid (text + vector) ───────────────────────────
     rrf_body = {
@@ -128,10 +149,10 @@ async def search_macro_data(query: str) -> str:
             result = await _call_elastic_tool(
                 "search", {"index": INDEX_NAME, "query_body": rrf_body}
             )
-            formatted = _format_tool_result(result)
+            formatted, titles = _format_tool_result(result)
             if "No relevant documents found" not in formatted:
                 logger.info("Hybrid RRF search succeeded | query=%r", query)
-                return formatted
+                return formatted, titles
             logger.debug("RRF returned no hits — trying keyword fallback")
         except Exception as exc:
             _rrf_unavailable = True
@@ -161,12 +182,23 @@ async def search_macro_data(query: str) -> str:
         result = await _call_elastic_tool(
             "search", {"index": INDEX_NAME, "query_body": keyword_body}
         )
-        formatted = _format_tool_result(result)
+        formatted, titles = _format_tool_result(result)
         logger.info("Keyword fallback search completed | query=%r", query)
-        return formatted
+        return formatted, titles
     except Exception as exc:
         logger.error("Keyword fallback search also failed: %s", exc)
-        return f"Search unavailable: {exc}"
+        return f"Search unavailable: {exc}", []
+
+
+@mcp.tool()
+async def search_macro_data(query: str) -> str:
+    """
+    Search the MacroPulse macro-economic knowledge base using hybrid retrieval
+    (RRF text + vector, with keyword fallback). Returns top document chunks with
+    source citations and relevance metadata.
+    """
+    text, _titles = await _search_with_sources(query)
+    return text
 
 
 if __name__ == "__main__":

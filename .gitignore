@@ -5,3 +5,9 @@ __pycache__/
 *.egg-info/
 .DS_Store
 .vscode/
+
+# Local-only artifacts (never commit)
+# Elastic deployment plan — contains a live secret_token
+deployment.json
+# 16MB of re-downloadable, copyrighted source PDFs — see ingest.py to rebuild the corpus
+knowledge_base/

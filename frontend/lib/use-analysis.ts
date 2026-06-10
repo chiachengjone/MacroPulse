@@ -89,13 +89,20 @@ export function useAnalysis() {
               });
               break;
 
-            case "agent1_search":
+            case "agent1_search": {
               add({
                 agent: "agent1",
                 text: String(evtData.query ?? ""),
                 kind: "search",
               });
+              const srcs = Array.isArray(evtData.sources)
+                ? (evtData.sources as string[])
+                : [];
+              for (const s of srcs.slice(0, 4)) {
+                add({ agent: "agent1", text: `retrieved: ${s}`, kind: "source" });
+              }
               break;
+            }
 
             case "agent1_complete":
               add({
@@ -130,7 +137,16 @@ export function useAnalysis() {
 
             case "agent2_complete": {
               const score = Number(evtData.score ?? 0);
+              const rawScore = evtData.raw_score != null ? Number(evtData.raw_score) : null;
               const threat = String(evtData.threat ?? "");
+              if (rawScore != null && Math.abs(rawScore - score) >= 0.1) {
+                const delta = score - rawScore;
+                add({
+                  agent: "agent2",
+                  text: `Raw: ${rawScore.toFixed(1)} → Adjusted: ${score.toFixed(1)} (${delta > 0 ? "+" : ""}${delta.toFixed(1)} audit correction)`,
+                  kind: "normal",
+                });
+              }
               add({
                 agent: "agent2",
                 text: `Score: ${score.toFixed(1)} / 10 — ${scoreLabel(score)}`,
@@ -141,6 +157,16 @@ export function useAnalysis() {
                 add({
                   agent: "agent2",
                   text: `Threat: ${threat}`,
+                  kind: "normal",
+                });
+              }
+              const grounding = evtData.grounding_strength
+                ? String(evtData.grounding_strength)
+                : null;
+              if (grounding) {
+                add({
+                  agent: "agent2",
+                  text: `Grounding: ${grounding}`,
                   kind: "normal",
                 });
               }

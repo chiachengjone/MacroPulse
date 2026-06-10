@@ -4,7 +4,7 @@ import logging
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Literal, Optional
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -74,7 +74,23 @@ SPECIALIST_PERSONA = (
     "full capital controls), score based on the described severity of those events — absence of "
     "evidence in the knowledge base is not contradiction.\n"
     "3. primary_threat_vector must describe the risk specific to this narrative. "
-    "requires_immediate_alert must be False when sovereign_risk_score < 5.0."
+    "requires_immediate_alert must be False when sovereign_risk_score < 5.0.\n"
+    "4. raw_narrative_score: score the narrative AS WRITTEN, taking all claims at face value "
+    "and ignoring the audit findings. This is the pre-audit baseline. "
+    "sovereign_risk_score is the audit-ADJUSTED final score — it must reflect the audit corrections. "
+    "These two scores should differ whenever the audit found contradictions or inflations.\n"
+    "5. GROUNDING ASSESSMENT — you are given the titles of the documents retrieved from the "
+    "knowledge base. Judge how well they ground THIS specific narrative and set grounding_strength:\n"
+    "   • STRONG — one or more retrieved documents are specifically about the country/entity/event "
+    "in the narrative (e.g. an IMF Article IV for that exact country, or that central bank's report).\n"
+    "   • PARTIAL — retrieved documents are topically relevant (general sovereign-risk / macro "
+    "research) but NONE are specific to this narrative's country/entity. The score then rests "
+    "largely on the narrative itself, not corroborating evidence.\n"
+    "   • LIMITED — retrieved documents are off-topic or absent; there is essentially no usable "
+    "grounding (e.g. the narrative is outside the sovereign/macro-risk domain).\n"
+    "   grounding_note: one concise sentence naming the evidence basis (or its absence). When "
+    "grounding is PARTIAL or LIMITED, explicitly state the assessment is narrative-driven and "
+    "should be treated as lower-confidence."
 )
 
 # ---------------------------------------------------------------------------
@@ -123,11 +139,17 @@ class EvaluationRequest(BaseModel):
 
 
 class SovereignRiskAssessment(BaseModel):
+    raw_narrative_score: float = Field(
+        ...,
+        ge=0.0,
+        le=10.0,
+        description="Pre-audit score: risk level if the narrative were taken at face value.",
+    )
     sovereign_risk_score: float = Field(
         ...,
         ge=0.0,
         le=10.0,
-        description="Composite sovereign risk score: 0.0 (negligible) → 10.0 (systemic collapse).",
+        description="Audit-adjusted composite sovereign risk score: 0.0 (negligible) → 10.0 (systemic collapse).",
     )
     primary_threat_vector: str = Field(
         ...,
@@ -157,6 +179,22 @@ class SovereignRiskAssessment(BaseModel):
             "to the trading desk or risk committee."
         ),
     )
+    grounding_strength: Literal["STRONG", "PARTIAL", "LIMITED"] = Field(
+        ...,
+        description=(
+            "How well the retrieved knowledge-base documents ground THIS narrative. "
+            "STRONG = entity-specific evidence found; PARTIAL = only general research; "
+            "LIMITED = off-topic/absent (treat score as low-confidence)."
+        ),
+    )
+    grounding_note: str = Field(
+        ...,
+        description="One sentence naming the evidence basis (or its absence) for the grounding rating.",
+    )
+    sources: list[str] = Field(
+        default_factory=list,
+        description="Titles of the knowledge-base documents retrieved to ground this assessment.",
+    )
 
 
 class EvaluationResponse(BaseModel):
@@ -168,10 +206,13 @@ class EvaluationResponse(BaseModel):
 
 # Internal model used by Agent 2 (excludes audit_findings — injected from Agent 1)
 class _SpecialistOutput(BaseModel):
+    raw_narrative_score: float = Field(..., ge=0.0, le=10.0)
     sovereign_risk_score: float = Field(..., ge=0.0, le=10.0)
     primary_threat_vector: str
     impact_assessment: str
     requires_immediate_alert: bool
+    grounding_strength: Literal["STRONG", "PARTIAL", "LIMITED"]
+    grounding_note: str
 
 # ---------------------------------------------------------------------------
 # Lifespan — Elastic MCP client startup / teardown
@@ -345,9 +386,9 @@ async def trigger_trading_desk_webhook(ticket: dict) -> None:
 async def _run_agent1_auditor(
     narrative: str,
     context: Optional[str],
-    max_turns: int = 2,
+    max_turns: int = 4,
     on_event: Optional[Callable[[str, dict], Any]] = None,
-) -> tuple[str, str]:
+) -> tuple[str, str, list[str]]:
     """
     Agent 1 — Fact Auditor.
 
@@ -355,7 +396,7 @@ async def _run_agent1_auditor(
     for grounding documents. When the model stops calling tools its final text
     response IS the structured audit — no separate extraction call needed.
 
-    Returns: (audit_findings_text, combined_grounding_docs)
+    Returns: (audit_findings_text, combined_grounding_docs, source_titles)
     """
     async def emit(evt: str, data: dict) -> None:
         if on_event:
@@ -374,6 +415,7 @@ async def _run_agent1_auditor(
 
     contents: list = [types.Content(role="user", parts=[types.Part(text=prompt)])]
     grounding_chunks: list[str] = []
+    source_titles: list[str] = []  # deduped doc titles retrieved across all searches
     inline_audit = ""  # captured directly from the loop's final turn
 
     for turn in range(max_turns):
@@ -403,9 +445,12 @@ async def _run_agent1_auditor(
             if fc.name == "search_macro_data":
                 query = fc.args.get("query", "")
                 logger.info("Agent1 → search_macro_data | query=%r", query)
-                await emit("agent1_search", {"query": query})
-                result = await app_module.search_macro_data(query)
+                result, titles = await app_module._search_with_sources(query)
                 grounding_chunks.append(result)
+                for t in titles:
+                    if t not in source_titles:
+                        source_titles.append(t)
+                await emit("agent1_search", {"query": query, "sources": titles})
                 fn_parts.append(
                     types.Part(
                         function_response=types.FunctionResponse(
@@ -442,7 +487,7 @@ async def _run_agent1_auditor(
     combined_grounding = "\n\n===\n\n".join(grounding_chunks) if grounding_chunks else ""
     if len(combined_grounding) > 12_000:
         combined_grounding = combined_grounding[:12_000] + "\n\n[... grounding truncated for context limits ...]"
-    return audit_text, combined_grounding
+    return audit_text, combined_grounding, source_titles
 
 
 async def _run_agent2_specialist(
@@ -450,13 +495,15 @@ async def _run_agent2_specialist(
     context: Optional[str],
     audit_findings: str,
     grounding_docs: str,
+    sources: list[str],
     on_event: Optional[Callable[[str, dict], Any]] = None,
 ) -> _SpecialistOutput:
     """
     Agent 2 — Sovereign Risk Specialist.
 
     Synthesises the original narrative, the Auditor's findings, and the raw
-    grounding documents into a structured sovereign risk assessment.
+    grounding documents into a structured sovereign risk assessment, and judges
+    how well the retrieved sources actually ground this specific narrative.
     """
     async def emit(evt: str, data: dict) -> None:
         if on_event:
@@ -464,14 +511,22 @@ async def _run_agent2_specialist(
 
     await emit("agent2_start", {"message": "Risk Specialist synthesizing narrative + audit + grounding docs..."})
 
+    sources_block = (
+        "RETRIEVED SOURCE DOCUMENTS (titles — judge grounding_strength against these):\n"
+        + ("\n".join(f"- {t}" for t in sources) if sources else "(none retrieved)")
+    )
     prompt = "\n\n".join(filter(None, [
         f"ORIGINAL NARRATIVE:\n{narrative}",
         f"CONTEXT: {context}" if context else None,
         f"GROUNDING DOCUMENTS (Elasticsearch):\n{grounding_docs}" if grounding_docs else None,
+        sources_block,
         f"FACT AUDITOR REPORT:\n{audit_findings}",
         (
             "Based on ALL the above, produce the final sovereign risk assessment. "
-            "Your score must reflect the audit-adjusted picture, not just the narrative's claims."
+            "Your score must reflect the audit-adjusted picture, not just the narrative's claims. "
+            "Set grounding_strength by judging whether the retrieved source documents are "
+            "specific to this narrative's country/entity (STRONG), merely general research "
+            "(PARTIAL), or off-topic/absent (LIMITED)."
         ),
     ]))
 
@@ -489,8 +544,11 @@ async def _run_agent2_specialist(
         result = response.parsed if getattr(response, "parsed", None) is not None else _SpecialistOutput.model_validate_json(response.text)
         await emit("agent2_complete", {
             "score": result.sovereign_risk_score,
+            "raw_score": result.raw_narrative_score,
             "threat": result.primary_threat_vector,
             "alert": result.requires_immediate_alert,
+            "grounding_strength": result.grounding_strength,
+            "grounding_note": result.grounding_note,
             "message": f"Score computed: {result.sovereign_risk_score:.1f}/10",
         })
         return result
@@ -528,22 +586,23 @@ async def _orchestrate(request: EvaluationRequest) -> EvaluationResponse:
 
     # ── Agent 1: Fact Auditor ─────────────────────────────────────────────
     try:
-        audit_findings, grounding_docs = await _run_agent1_auditor(
+        audit_findings, grounding_docs, sources = await _run_agent1_auditor(
             request.narrative, request.context
         )
     except Exception as exc:
         logger.error("Agent 1 (Fact Auditor) failed: %s", exc)
         raise HTTPException(status_code=502, detail=f"Fact Auditor agent failure: {exc}")
-    logger.info("Auditor complete | audit_chars=%d", len(audit_findings))
+    logger.info("Auditor complete | audit_chars=%d | sources=%d", len(audit_findings), len(sources))
 
     # ── Agent 2: Sovereign Risk Specialist ────────────────────────────────
     specialist_output = await _run_agent2_specialist(
-        request.narrative, request.context, audit_findings, grounding_docs
+        request.narrative, request.context, audit_findings, grounding_docs, sources
     )
     logger.info(
-        "Specialist complete | score=%.2f | threat=%r",
+        "Specialist complete | score=%.2f | threat=%r | grounding=%s",
         specialist_output.sovereign_risk_score,
         specialist_output.primary_threat_vector,
+        specialist_output.grounding_strength,
     )
 
     # Enforce consistency: alert cannot fire for low-risk scores regardless of model output.
@@ -552,11 +611,15 @@ async def _orchestrate(request: EvaluationRequest) -> EvaluationResponse:
 
     # Compose final assessment — inject Agent 1's audit into the output model
     assessment = SovereignRiskAssessment(
+        raw_narrative_score=specialist_output.raw_narrative_score,
         sovereign_risk_score=specialist_output.sovereign_risk_score,
         primary_threat_vector=specialist_output.primary_threat_vector,
         audit_findings=audit_findings,
         impact_assessment=specialist_output.impact_assessment,
         requires_immediate_alert=alert_flag,
+        grounding_strength=specialist_output.grounding_strength,
+        grounding_note=specialist_output.grounding_note,
+        sources=sources,
     )
 
     alert_dispatched = False
@@ -616,33 +679,38 @@ async def _orchestrate_streaming(
 ) -> EvaluationResponse:
     """Run the two-agent pipeline, firing on_event callbacks at each step."""
     try:
-        audit_findings, grounding_docs = await _run_agent1_auditor(
+        audit_findings, grounding_docs, sources = await _run_agent1_auditor(
             request.narrative, request.context, on_event=on_event
         )
     except Exception as exc:
         logger.error("Agent 1 (Fact Auditor) failed: %s", exc)
         await on_event("error", {"message": f"Fact Auditor failed: {exc}"})
         raise HTTPException(status_code=502, detail=f"Fact Auditor agent failure: {exc}")
-    logger.info("Auditor complete | audit_chars=%d", len(audit_findings))
+    logger.info("Auditor complete | audit_chars=%d | sources=%d", len(audit_findings), len(sources))
 
     specialist_output = await _run_agent2_specialist(
-        request.narrative, request.context, audit_findings, grounding_docs,
+        request.narrative, request.context, audit_findings, grounding_docs, sources,
         on_event=on_event,
     )
     logger.info(
-        "Specialist complete | score=%.2f | threat=%r",
+        "Specialist complete | score=%.2f | threat=%r | grounding=%s",
         specialist_output.sovereign_risk_score,
         specialist_output.primary_threat_vector,
+        specialist_output.grounding_strength,
     )
 
     alert_flag = specialist_output.requires_immediate_alert and specialist_output.sovereign_risk_score >= 5.0
 
     assessment = SovereignRiskAssessment(
+        raw_narrative_score=specialist_output.raw_narrative_score,
         sovereign_risk_score=specialist_output.sovereign_risk_score,
         primary_threat_vector=specialist_output.primary_threat_vector,
         audit_findings=audit_findings,
         impact_assessment=specialist_output.impact_assessment,
         requires_immediate_alert=alert_flag,
+        grounding_strength=specialist_output.grounding_strength,
+        grounding_note=specialist_output.grounding_note,
+        sources=sources,
     )
 
     alert_dispatched = False

@@ -37,7 +37,7 @@ export default function Home() {
               Multi-agent sovereign risk intelligence
               <br />
               <span className="text-neutral-700">
-                Gemini 2.5 Pro · Elasticsearch Serverless · Two-agent correction loop
+                Gemini 2.5 Flash · Elasticsearch Serverless · Two-agent correction loop
               </span>
             </p>
           )}

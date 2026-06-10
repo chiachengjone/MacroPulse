@@ -13,11 +13,15 @@ export function RiskResults({ result }: RiskResultsProps) {
   const { assessment, model_used, evaluation_timestamp, alert_dispatched } =
     result;
   const {
+    raw_narrative_score: rawScore,
     sovereign_risk_score: score,
     primary_threat_vector,
     audit_findings,
     impact_assessment,
     requires_immediate_alert: alert,
+    grounding_strength: grounding,
+    grounding_note: groundingNote,
+    sources,
   } = assessment;
 
   const sc = scoreColor(score);
@@ -35,6 +39,14 @@ export function RiskResults({ result }: RiskResultsProps) {
         <div className="bg-green-950/30 border border-green-900/40 rounded-xl px-5 py-3.5 text-green-300 text-sm font-medium">
           Standard Review Queue — No Immediate Escalation
         </div>
+      )}
+
+      {/* Grounding strength */}
+      {grounding && <GroundingBanner strength={grounding} note={groundingNote} />}
+
+      {/* Audit correction delta */}
+      {rawScore != null && (
+        <ScoreDelta raw={rawScore} adjusted={score} />
       )}
 
       {/* Score + Threat */}
@@ -94,6 +106,21 @@ export function RiskResults({ result }: RiskResultsProps) {
         <MarkdownBody text={impact_assessment} />
       </Accordion>
 
+      {sources && sources.length > 0 && (
+        <Accordion title={`Grounding Sources (${sources.length})`}>
+          <ul className="space-y-1.5">
+            {sources.map((s, i) => (
+              <li key={i} className="flex gap-2.5 text-neutral-400 text-[0.8rem] leading-snug">
+                <span className="text-neutral-700 font-mono select-none flex-shrink-0">
+                  {String(i + 1).padStart(2, "0")}
+                </span>
+                <span>{s}</span>
+              </li>
+            ))}
+          </ul>
+        </Accordion>
+      )}
+
       <Accordion title="Response Metadata">
         <pre className="text-neutral-500 text-xs bg-[#0a0a0a] rounded-lg p-4 overflow-auto leading-relaxed">
           {JSON.stringify({ model_used, evaluation_timestamp, alert_dispatched }, null, 2)}
@@ -104,6 +131,95 @@ export function RiskResults({ result }: RiskResultsProps) {
 }
 
 // ── Sub-components ────────────────────────────────────────────────────────────
+
+const GROUNDING_STYLE = {
+  STRONG: {
+    dot: "bg-emerald-400",
+    text: "text-emerald-300",
+    box: "bg-emerald-950/30 border-emerald-900/40",
+    label: "Strong grounding",
+  },
+  PARTIAL: {
+    dot: "bg-amber-400",
+    text: "text-amber-300",
+    box: "bg-amber-950/30 border-amber-900/40",
+    label: "Partial grounding",
+  },
+  LIMITED: {
+    dot: "bg-neutral-500",
+    text: "text-neutral-400",
+    box: "bg-[#141414] border-[#262626]",
+    label: "Limited grounding — low confidence",
+  },
+} as const;
+
+function GroundingBanner({
+  strength,
+  note,
+}: {
+  strength: "STRONG" | "PARTIAL" | "LIMITED";
+  note: string;
+}) {
+  const s = GROUNDING_STYLE[strength] ?? GROUNDING_STYLE.LIMITED;
+  return (
+    <div className={cn("rounded-xl border px-5 py-3.5", s.box)}>
+      <div className="flex items-center gap-2">
+        <span className={cn("w-1.5 h-1.5 rounded-full flex-shrink-0", s.dot)} />
+        <span className={cn("text-[0.62rem] uppercase tracking-widest font-mono font-semibold", s.text)}>
+          {s.label}
+        </span>
+      </div>
+      {note && <p className="text-neutral-400 text-[0.8rem] leading-relaxed mt-1.5">{note}</p>}
+    </div>
+  );
+}
+
+function ScoreDelta({ raw, adjusted }: { raw: number; adjusted: number }) {
+  const delta = adjusted - raw;
+  const unchanged = Math.abs(delta) < 0.1;
+  const deltaLabel = unchanged
+    ? "No change"
+    : `${delta > 0 ? "+" : ""}${delta.toFixed(1)}`;
+  const deltaColor = unchanged
+    ? "text-neutral-500"
+    : delta < 0
+    ? "text-emerald-400"
+    : "text-orange-400";
+
+  return (
+    <div className="grid grid-cols-3 gap-px bg-[#1e1e1e] rounded-xl overflow-hidden text-center">
+      <div className="bg-[#111111] px-4 py-3">
+        <p className="text-[0.6rem] text-neutral-600 uppercase tracking-widest font-mono mb-1">
+          Raw Narrative
+        </p>
+        <p className="text-2xl font-bold tabular-nums text-neutral-400">
+          {raw.toFixed(1)}
+        </p>
+        <p className="text-[0.6rem] text-neutral-700 font-mono mt-0.5">pre-audit</p>
+      </div>
+      <div className="bg-[#111111] px-4 py-3 flex flex-col items-center justify-center">
+        <p className="text-[0.6rem] text-neutral-600 uppercase tracking-widest font-mono mb-1">
+          Audit Correction
+        </p>
+        <p className={cn("text-2xl font-bold tabular-nums", deltaColor)}>
+          {deltaLabel}
+        </p>
+        <p className="text-[0.6rem] text-neutral-700 font-mono mt-0.5">
+          {unchanged ? "narrative confirmed" : delta < 0 ? "score reduced" : "score raised"}
+        </p>
+      </div>
+      <div className="bg-[#111111] px-4 py-3">
+        <p className="text-[0.6rem] text-neutral-600 uppercase tracking-widest font-mono mb-1">
+          Adjusted Score
+        </p>
+        <p className="text-2xl font-bold tabular-nums text-neutral-100">
+          {adjusted.toFixed(1)}
+        </p>
+        <p className="text-[0.6rem] text-neutral-700 font-mono mt-0.5">final</p>
+      </div>
+    </div>
+  );
+}
 
 function Tag({
   children,

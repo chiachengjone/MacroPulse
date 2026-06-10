@@ -23,6 +23,12 @@ const PRESETS = [
       "Rising US Treasury yields and a strengthening dollar are triggering capital outflows from frontier markets. Pakistan's IMF programme is at risk of derailment after missed fiscal targets, Ghana has entered debt restructuring talks, and Sri Lanka's post-default recovery is stalling. Cross-country contagion is accelerating as investors reduce broad EM exposure and sovereign CDS spreads widen across the board.",
     context: "EM contagion, capital flows, IMF programmes, frontier market debt",
   },
+  {
+    label: "Singapore Banking Stress",
+    narrative:
+      "Singapore's financial system is flashing warning signs as private residential property prices reportedly crater under the highest interest rates in two decades. The three domestic banks — DBS, OCBC, and UOB — are said to be carrying dangerous exposure to distressed Chinese property developers and souring regional commercial real estate, with non-performing loans surging across the sector. The Singapore dollar has slid against the US dollar, and speculation is mounting that MAS will be forced to abandon its exchange-rate-centred policy framework. Analysts warn of accelerating capital flight as the city-state's safe-haven status erodes.",
+    context: "Banking sector stability, property market, SGD / MAS exchange-rate policy, regional contagion",
+  },
 ];
 
 interface ChatInputProps {
