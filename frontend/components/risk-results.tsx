@@ -18,10 +18,10 @@ export function RiskResults({ result }: RiskResultsProps) {
     primary_threat_vector,
     audit_findings,
     impact_assessment,
-    requires_immediate_alert: alert,
     grounding_strength: grounding,
     grounding_note: groundingNote,
     sources,
+    action_disposition: disposition,
   } = assessment;
 
   const sc = scoreColor(score);
@@ -30,16 +30,8 @@ export function RiskResults({ result }: RiskResultsProps) {
 
   return (
     <div className="space-y-4">
-      {/* Alert banner */}
-      {alert ? (
-        <div className="bg-red-950/40 border border-red-900/50 rounded-xl px-5 py-3.5 text-red-300 text-sm font-medium">
-          IMMEDIATE ESCALATION REQUIRED — Trading Desk Alert Active
-        </div>
-      ) : (
-        <div className="bg-green-950/30 border border-green-900/40 rounded-xl px-5 py-3.5 text-green-300 text-sm font-medium">
-          Standard Review Queue — No Immediate Escalation
-        </div>
-      )}
+      {/* Autonomy decision — confidence-gated action */}
+      <DecisionBanner disposition={disposition} dispatched={alert_dispatched} />
 
       {/* Grounding strength */}
       {grounding && <GroundingBanner strength={grounding} note={groundingNote} />}
@@ -131,6 +123,71 @@ export function RiskResults({ result }: RiskResultsProps) {
 }
 
 // ── Sub-components ────────────────────────────────────────────────────────────
+
+const DISPOSITION_STYLE: Record<
+  string,
+  { box: string; text: string; dot: string; label: string; detail: string }
+> = {
+  AUTO_ESCALATE: {
+    box: "bg-red-950/40 border-red-900/60",
+    text: "text-red-300",
+    dot: "bg-red-400",
+    label: "Auto-escalated to trading desk",
+    detail: "High risk with strong evidence — the system dispatched the alert autonomously.",
+  },
+  ESCALATE_FLAGGED: {
+    box: "bg-orange-950/40 border-orange-900/60",
+    text: "text-orange-300",
+    dot: "bg-orange-400",
+    label: "Escalated — flagged low confidence",
+    detail: "High risk but only partial grounding — escalated with a confidence caveat for review.",
+  },
+  STANDARD_QUEUE: {
+    box: "bg-[#111111] border-[#262626]",
+    text: "text-neutral-300",
+    dot: "bg-blue-400",
+    label: "Standard review queue",
+    detail: "Routine risk profile — no immediate action required.",
+  },
+  AUTO_CLEAR: {
+    box: "bg-emerald-950/30 border-emerald-900/40",
+    text: "text-emerald-300",
+    dot: "bg-emerald-400",
+    label: "Auto-cleared",
+    detail: "Low risk with strong evidence — cleared autonomously, no escalation.",
+  },
+  HUMAN_REVIEW: {
+    box: "bg-amber-950/30 border-amber-900/50",
+    text: "text-amber-300",
+    dot: "bg-amber-400",
+    label: "Routed for human review",
+    detail: "Grounding is insufficient for an autonomous decision — deferred to a human analyst.",
+  },
+};
+
+function DecisionBanner({
+  disposition,
+  dispatched,
+}: {
+  disposition: string;
+  dispatched: boolean;
+}) {
+  const s = DISPOSITION_STYLE[disposition] ?? DISPOSITION_STYLE.STANDARD_QUEUE;
+  return (
+    <div className={cn("rounded-xl border px-5 py-3.5", s.box)}>
+      <div className="flex items-center gap-2">
+        <span className={cn("w-1.5 h-1.5 rounded-full flex-shrink-0", s.dot)} />
+        <span className={cn("text-[0.7rem] uppercase tracking-widest font-mono font-semibold", s.text)}>
+          {s.label}
+        </span>
+        <span className="ml-auto text-[0.55rem] uppercase tracking-widest font-mono text-neutral-600">
+          {dispatched ? "alert dispatched" : "no auto-action"}
+        </span>
+      </div>
+      <p className="text-neutral-400 text-[0.8rem] leading-relaxed mt-1.5">{s.detail}</p>
+    </div>
+  );
+}
 
 const GROUNDING_STYLE = {
   STRONG: {

@@ -4,9 +4,17 @@ import { useState, useCallback, useRef } from "react";
 import { scoreLabel } from "./utils";
 import type { PipelineStep, EvaluationResponse, AppState } from "./types";
 
-const API_URL =
+export const API_URL =
   process.env.NEXT_PUBLIC_API_URL ||
   "https://macropulse-270431042772.us-central1.run.app";
+
+const DISPOSITION_FEED_LABEL: Record<string, string> = {
+  AUTO_ESCALATE: "Auto-escalated to desk",
+  ESCALATE_FLAGGED: "Escalated — low confidence",
+  STANDARD_QUEUE: "Standard review queue",
+  AUTO_CLEAR: "Auto-cleared",
+  HUMAN_REVIEW: "Routed for human review",
+};
 
 export function useAnalysis() {
   const [state, setState] = useState<AppState>("idle");
@@ -170,6 +178,16 @@ export function useAnalysis() {
                   kind: "normal",
                 });
               }
+              break;
+            }
+
+            case "decision": {
+              const disp = String(evtData.disposition ?? "");
+              add({
+                agent: "agent2",
+                text: `Decision: ${DISPOSITION_FEED_LABEL[disp] ?? disp}`,
+                kind: "normal",
+              });
               break;
             }
 

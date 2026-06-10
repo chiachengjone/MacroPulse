@@ -5,6 +5,7 @@ import { useAnalysis } from "@/lib/use-analysis";
 import { ChatInput } from "@/components/chat-input";
 import { PipelineFeed } from "@/components/pipeline-feed";
 import { RiskResults } from "@/components/risk-results";
+import { HistoryPanel } from "@/components/history-panel";
 
 export default function Home() {
   const { state, steps, result, error, analyse, reset } = useAnalysis();
@@ -45,6 +46,9 @@ export default function Home() {
 
         {/* Chat input */}
         <ChatInput onSubmit={analyse} disabled={isRunning} />
+
+        {/* Recent assessments from the Elasticsearch audit trail (idle only) */}
+        {!hasActivity && <HistoryPanel />}
 
         {/* Error */}
         {isError && error && (

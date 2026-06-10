@@ -195,6 +195,16 @@ class SovereignRiskAssessment(BaseModel):
         default_factory=list,
         description="Titles of the knowledge-base documents retrieved to ground this assessment.",
     )
+    action_disposition: Literal[
+        "AUTO_ESCALATE", "ESCALATE_FLAGGED", "STANDARD_QUEUE", "AUTO_CLEAR", "HUMAN_REVIEW"
+    ] = Field(
+        ...,
+        description=(
+            "Deterministic autonomy decision combining risk score × grounding confidence. "
+            "The system only auto-acts (dispatches an alert) when confident; weak grounding "
+            "is routed to HUMAN_REVIEW rather than acted on autonomously."
+        ),
+    )
 
 
 class EvaluationResponse(BaseModel):
@@ -330,6 +340,54 @@ def _fire_and_forget(coro) -> asyncio.Task:
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
     return task
+
+# ---------------------------------------------------------------------------
+# Autonomy policy — deterministic gate combining risk score × grounding confidence.
+# The system only ACTS on its own (dispatches an alert) when it is confident;
+# weak grounding is routed to a human instead of acted on autonomously. Computing
+# this in code (not via the LLM) keeps the autonomy rule transparent and auditable.
+# ---------------------------------------------------------------------------
+_DISPATCH_DISPOSITIONS = {"AUTO_ESCALATE", "ESCALATE_FLAGGED"}
+
+
+def decide_disposition(score: float, grounding: str) -> str:
+    """Map (audit-adjusted score, grounding strength) → an autonomy decision."""
+    if grounding == "LIMITED":
+        # No usable evidence — never act autonomously, regardless of the score.
+        return "HUMAN_REVIEW"
+    if score >= 7.5:
+        return "AUTO_ESCALATE" if grounding == "STRONG" else "ESCALATE_FLAGGED"
+    if score >= 5.0:
+        return "STANDARD_QUEUE" if grounding == "STRONG" else "HUMAN_REVIEW"
+    return "AUTO_CLEAR" if grounding == "STRONG" else "STANDARD_QUEUE"
+
+# ---------------------------------------------------------------------------
+# Audit trail — every assessment is persisted to a searchable Elasticsearch index
+# (governance / provenance). Fire-and-forget, same pattern as the webhook. The
+# index is queryable like any other — including via the Elastic MCP server.
+# ---------------------------------------------------------------------------
+_AUDIT_INDEX = "macro-pulse-audit"
+
+
+async def record_audit(record: dict) -> None:
+    endpoint = os.environ.get("ELASTIC_ENDPOINT", "").rstrip("/")
+    api_key = os.environ.get("ELASTIC_API_KEY", "")
+    if not endpoint or not api_key:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
+            resp = await client.post(
+                f"{endpoint}/{_AUDIT_INDEX}/_doc",
+                json=record,
+                headers={
+                    "Authorization": f"ApiKey {api_key}",
+                    "Content-Type": "application/json",
+                },
+            )
+            resp.raise_for_status()
+            logger.info("Audit record persisted | disposition=%s", record.get("action_disposition"))
+    except (httpx.HTTPStatusError, httpx.RequestError) as exc:
+        logger.error("Audit persistence failed: %s", exc)
 
 # ---------------------------------------------------------------------------
 # Outbound Webhook — Trading Desk Alert
@@ -576,6 +634,74 @@ async def health_check() -> dict:
     }
 
 
+def _finalize_response(
+    request: EvaluationRequest,
+    specialist_output: _SpecialistOutput,
+    audit_findings: str,
+    sources: list[str],
+) -> EvaluationResponse:
+    """
+    Apply the autonomy policy, compose the final assessment, gate the alert on
+    confidence, and persist the audit record. Shared by both route handlers.
+    """
+    score = specialist_output.sovereign_risk_score
+    grounding = specialist_output.grounding_strength
+    disposition = decide_disposition(score, grounding)
+
+    # The LLM's recommendation is kept for transparency; the deterministic gate decides the action.
+    alert_flag = specialist_output.requires_immediate_alert and score >= 5.0
+
+    assessment = SovereignRiskAssessment(
+        raw_narrative_score=specialist_output.raw_narrative_score,
+        sovereign_risk_score=score,
+        primary_threat_vector=specialist_output.primary_threat_vector,
+        audit_findings=audit_findings,
+        impact_assessment=specialist_output.impact_assessment,
+        requires_immediate_alert=alert_flag,
+        grounding_strength=grounding,
+        grounding_note=specialist_output.grounding_note,
+        sources=sources,
+        action_disposition=disposition,
+    )
+
+    # Auto-dispatch ONLY when the policy is confident enough to act on its own.
+    alert_dispatched = disposition in _DISPATCH_DISPOSITIONS
+    if alert_dispatched:
+        ticket = assessment.model_dump()
+        ticket["low_confidence"] = disposition == "ESCALATE_FLAGGED"
+        _fire_and_forget(trigger_trading_desk_webhook(ticket))
+
+    ts = datetime.now(timezone.utc).isoformat()
+
+    # Persist every assessment to the searchable audit trail (governance / provenance).
+    _fire_and_forget(record_audit({
+        "timestamp": ts,
+        "narrative": request.narrative,
+        "context": request.context,
+        "raw_narrative_score": specialist_output.raw_narrative_score,
+        "sovereign_risk_score": score,
+        "primary_threat_vector": specialist_output.primary_threat_vector,
+        "grounding_strength": grounding,
+        "grounding_note": specialist_output.grounding_note,
+        "action_disposition": disposition,
+        "alert_dispatched": alert_dispatched,
+        "sources": sources,
+        "model_used": GEMINI_MODEL,
+    }))
+
+    logger.info(
+        "Finalized | score=%.2f | grounding=%s | disposition=%s | dispatched=%s",
+        score, grounding, disposition, alert_dispatched,
+    )
+
+    return EvaluationResponse(
+        assessment=assessment,
+        model_used=GEMINI_MODEL,
+        evaluation_timestamp=ts,
+        alert_dispatched=alert_dispatched,
+    )
+
+
 async def _orchestrate(request: EvaluationRequest) -> EvaluationResponse:
     """Shared handler for both route aliases."""
     logger.info(
@@ -605,39 +731,7 @@ async def _orchestrate(request: EvaluationRequest) -> EvaluationResponse:
         specialist_output.grounding_strength,
     )
 
-    # Enforce consistency: alert cannot fire for low-risk scores regardless of model output.
-    # Prevents hallucinated alerts when sovereign_risk_score < 5.0.
-    alert_flag = specialist_output.requires_immediate_alert and specialist_output.sovereign_risk_score >= 5.0
-
-    # Compose final assessment — inject Agent 1's audit into the output model
-    assessment = SovereignRiskAssessment(
-        raw_narrative_score=specialist_output.raw_narrative_score,
-        sovereign_risk_score=specialist_output.sovereign_risk_score,
-        primary_threat_vector=specialist_output.primary_threat_vector,
-        audit_findings=audit_findings,
-        impact_assessment=specialist_output.impact_assessment,
-        requires_immediate_alert=alert_flag,
-        grounding_strength=specialist_output.grounding_strength,
-        grounding_note=specialist_output.grounding_note,
-        sources=sources,
-    )
-
-    alert_dispatched = False
-    if assessment.sovereign_risk_score >= 7.5 or assessment.requires_immediate_alert:
-        _fire_and_forget(trigger_trading_desk_webhook(assessment.model_dump()))
-        alert_dispatched = True
-        logger.info(
-            "Alert queued | score=%.2f | immediate=%s",
-            assessment.sovereign_risk_score,
-            assessment.requires_immediate_alert,
-        )
-
-    return EvaluationResponse(
-        assessment=assessment,
-        model_used=GEMINI_MODEL,
-        evaluation_timestamp=datetime.now(timezone.utc).isoformat(),
-        alert_dispatched=alert_dispatched,
-    )
+    return _finalize_response(request, specialist_output, audit_findings, sources)
 
 
 @app.post(
@@ -699,36 +793,11 @@ async def _orchestrate_streaming(
         specialist_output.grounding_strength,
     )
 
-    alert_flag = specialist_output.requires_immediate_alert and specialist_output.sovereign_risk_score >= 5.0
-
-    assessment = SovereignRiskAssessment(
-        raw_narrative_score=specialist_output.raw_narrative_score,
-        sovereign_risk_score=specialist_output.sovereign_risk_score,
-        primary_threat_vector=specialist_output.primary_threat_vector,
-        audit_findings=audit_findings,
-        impact_assessment=specialist_output.impact_assessment,
-        requires_immediate_alert=alert_flag,
-        grounding_strength=specialist_output.grounding_strength,
-        grounding_note=specialist_output.grounding_note,
-        sources=sources,
-    )
-
-    alert_dispatched = False
-    if assessment.sovereign_risk_score >= 7.5 or assessment.requires_immediate_alert:
-        _fire_and_forget(trigger_trading_desk_webhook(assessment.model_dump()))
-        alert_dispatched = True
-        logger.info(
-            "Alert queued | score=%.2f | immediate=%s",
-            assessment.sovereign_risk_score,
-            assessment.requires_immediate_alert,
-        )
-
-    result = EvaluationResponse(
-        assessment=assessment,
-        model_used=GEMINI_MODEL,
-        evaluation_timestamp=datetime.now(timezone.utc).isoformat(),
-        alert_dispatched=alert_dispatched,
-    )
+    result = _finalize_response(request, specialist_output, audit_findings, sources)
+    await on_event("decision", {
+        "disposition": result.assessment.action_disposition,
+        "dispatched": result.alert_dispatched,
+    })
     await on_event("complete", result.model_dump())
     return result
 
@@ -772,6 +841,57 @@ async def evaluate_stream(request: EvaluationRequest):
             yield {"event": event_type, "data": json.dumps(data)}
 
     return EventSourceResponse(event_generator())
+
+
+# ---------------------------------------------------------------------------
+# Audit history — reads the persisted assessment trail (governance / provenance)
+# ---------------------------------------------------------------------------
+
+async def _read_audit_history(size: int = 20) -> list[dict]:
+    endpoint = os.environ.get("ELASTIC_ENDPOINT", "").rstrip("/")
+    api_key = os.environ.get("ELASTIC_API_KEY", "")
+    if not endpoint or not api_key:
+        return []
+    body = {
+        "size": max(1, min(size, 100)),
+        "sort": [{"timestamp": {"order": "desc", "unmapped_type": "date"}}],
+        "_source": [
+            "timestamp", "narrative", "context", "raw_narrative_score",
+            "sovereign_risk_score", "primary_threat_vector", "grounding_strength",
+            "action_disposition", "alert_dispatched",
+        ],
+    }
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
+            resp = await client.post(
+                f"{endpoint}/{_AUDIT_INDEX}/_search",
+                json=body,
+                headers={"Authorization": f"ApiKey {api_key}", "Content-Type": "application/json"},
+            )
+            if resp.status_code == 404:
+                return []  # no assessments recorded yet — index not created
+            resp.raise_for_status()
+            hits = resp.json().get("hits", {}).get("hits", [])
+            return [h.get("_source", {}) for h in hits]
+    except (httpx.HTTPStatusError, httpx.RequestError) as exc:
+        logger.error("Audit history read failed: %s", exc)
+        return []
+
+
+@app.get(
+    "/api/v1/history",
+    operation_id="evaluation_history",
+    summary="Recent Assessment Audit Trail",
+    description=(
+        "Returns the most recent assessments from the searchable Elasticsearch "
+        "audit trail — narrative, scores, grounding strength, and autonomy disposition. "
+        "Every evaluation is persisted for governance and provenance."
+    ),
+    tags=["Risk Intelligence"],
+)
+async def evaluation_history(size: int = 20) -> dict:
+    records = await _read_audit_history(size)
+    return {"count": len(records), "assessments": records}
 
 
 # ---------------------------------------------------------------------------
