@@ -6,7 +6,7 @@ const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
   title: "MacroPulse",
-  description: "Multi-agent sovereign risk intelligence — Gemini 2.5 Pro · Elasticsearch Serverless",
+  description: "Multi-agent sovereign risk intelligence — Gemini 2.5 Flash · Elasticsearch Serverless",
 };
 
 export default function RootLayout({
