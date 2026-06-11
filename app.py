@@ -74,13 +74,15 @@ def _format_tool_result(result: Any) -> tuple[str, list[str]]:
                 title = att.get("title") or hit.get("_id", "Untitled")
                 content = (att.get("content") or "").strip()
                 if content:
+                    _MAX = 4000
+                    snippet = content[:_MAX] + (" …[truncated]" if len(content) > _MAX else "")
                     chunks.append(
-                        f"[Doc {i} | score={score} | source: {title}]\n{content}"
+                        f"[Doc {i} | score={score} | source: {title}]\n{snippet}"
                     )
                     titles.append(title)
         else:
             # Plain-text fallback (server already formatted the response)
-            chunks.append(item.text.strip())
+            chunks.append(item.text.strip()[:20000])
 
     text = "\n\n---\n\n".join(chunks) if chunks else "No relevant documents found."
     return text, titles

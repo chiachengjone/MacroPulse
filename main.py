@@ -82,7 +82,12 @@ SPECIALIST_PERSONA = (
     "3. primary_threat_vector must describe the risk specific to this narrative. "
     "requires_immediate_alert must be False when sovereign_risk_score < 5.0.\n"
     "4. raw_narrative_score: score the narrative AS WRITTEN, taking all claims at face value "
-    "and ignoring the audit findings. This is the pre-audit baseline. "
+    "and ignoring the audit findings. This is the pre-audit baseline. However, it must still "
+    "reflect the sovereign's known structural risk floor — a positive headline about a country "
+    "with a history of default, IMF programs, or chronic inflation (e.g. Argentina, Pakistan, "
+    "Türkiye, Egypt) should never score below 4.5 on the raw scale, even if the claims are "
+    "optimistic. Narrative framing can reduce the score from a country's typical risk band but "
+    "cannot eliminate the underlying structural risk. "
     "sovereign_risk_score is the audit-ADJUSTED final score — it must reflect the audit corrections. "
     "These two scores should differ whenever the audit found contradictions or inflations.\n"
     "5. GROUNDING ASSESSMENT — you are given the titles of the documents retrieved from the "
@@ -1461,7 +1466,7 @@ async def fetch_live_market_feed(request: MarketFeedRequest) -> dict:
     return await _fetch_live_market_feed(request.countries)
 
 
-async def _run_alert_for_profile(email: str, profile: dict) -> dict:
+async def _run_alert_for_profile(email: str, profile: dict, force_send: bool = False) -> dict:
     """
     Live-briefing agent, shared by the manual trigger and the scheduled sweep:
     pull live market data (FX + FRED) for the subscriber's countries/metrics, ask
@@ -1511,9 +1516,9 @@ async def _run_alert_for_profile(email: str, profile: dict) -> dict:
             "The live market data was still gathered and is included below."
         )
 
-    # 3 — email the briefing, unless the subscriber has turned email alerts off.
+    # 3 — email the briefing. force_send (manual trigger) always sends regardless of is_active.
     ts = datetime.now(timezone.utc).isoformat()
-    if profile.get("is_active", True):
+    if force_send or profile.get("is_active", True):
         subject = f"MacroPulse Briefing — {', '.join(country_names)}"
         html = _briefing_html(report, live, country_names, metrics)
         email_result = await _send_email_resend(email, subject, report, html)
@@ -1556,7 +1561,7 @@ async def execute_immediate_alert_run(request: AlertRunRequest) -> dict:
     profile = await _get_subscriber(email)
     if not profile:
         raise HTTPException(status_code=404, detail="No subscriber profile found — save your preferences first.")
-    return await _run_alert_for_profile(email, profile)
+    return await _run_alert_for_profile(email, profile, force_send=True)
 
 
 def _is_due(profile: dict, now: datetime) -> bool:
