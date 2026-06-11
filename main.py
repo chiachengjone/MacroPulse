@@ -1567,6 +1567,8 @@ async def execute_immediate_alert_run(request: AlertRunRequest) -> dict:
 def _is_due(profile: dict, now: datetime) -> bool:
     """True if the subscriber's interval has elapsed since its last run."""
     interval = profile.get("alert_triggers", {}).get("interval_minutes", 60)
+    if not interval:
+        return False  # interval=0 means Never — skip in sweep
     last = profile.get("last_run_at")
     if not last:
         return True  # never run — due immediately

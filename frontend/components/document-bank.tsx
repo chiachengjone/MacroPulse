@@ -208,29 +208,9 @@ export function DocumentBank() {
             })}
           </div>
 
-          {/* Interval + max docs */}
+          {/* Max docs */}
           <div className="flex gap-3 mb-3">
             <div className="flex-1">
-              <label className="block text-[0.62rem] text-neutral-600 mb-1.5">Scan interval</label>
-              <div className="flex gap-1">
-                {intervals.map((iv) => (
-                  <button
-                    key={iv}
-                    type="button"
-                    onClick={() => setIntervalH(iv)}
-                    className={cn(
-                      "flex-1 px-1.5 py-1.5 text-[0.6rem] rounded-lg border transition-colors",
-                      interval === iv
-                        ? "bg-[#1f1f1f] border-[#3a3a3a] text-neutral-200"
-                        : "bg-[#111111] border-[#242424] text-neutral-600 hover:border-[#3a3a3a]"
-                    )}
-                  >
-                    {INTERVAL_LABEL[iv] ?? `${iv}h`}
-                  </button>
-                ))}
-              </div>
-            </div>
-            <div className="w-20">
               <label className="block text-[0.62rem] text-neutral-600 mb-1.5">Max docs</label>
               <input
                 type="number"
@@ -249,9 +229,7 @@ export function DocumentBank() {
             onClick={() => setActive((v) => !v)}
             className="flex items-center justify-between w-full mb-4 px-3 py-2 rounded-lg bg-[#111111] border border-[#242424] hover:border-[#3a3a3a] transition-colors"
           >
-            <span className="text-xs text-neutral-400">
-              Autonomous ({INTERVAL_LABEL[interval] ?? `${interval}h`})
-            </span>
+            <span className="text-xs text-neutral-400">Autonomous (Daily)</span>
             <span
               className={cn(
                 "text-[0.6rem] px-2 py-0.5 rounded-full border",

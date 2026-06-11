@@ -29,7 +29,8 @@ interface AlertRunResult {
   email_status: string;
 }
 
-const INTERVAL_OPTIONS = [15, 30, 60, 120];
+const INTERVAL_OPTIONS = [15, 30, 60, 120, 0];
+const INTERVAL_LABEL: Record<number, string> = { 15: "15m", 30: "30m", 60: "1h", 120: "2h", 0: "Never" };
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 
 export function AlertSubscription() {
@@ -229,7 +230,7 @@ export function AlertSubscription() {
                     : "bg-[#111111] border-[#242424] text-neutral-600 hover:border-[#3a3a3a]"
                 )}
               >
-                {iv}m
+                {INTERVAL_LABEL[iv]}
               </button>
             ))}
           </div>
