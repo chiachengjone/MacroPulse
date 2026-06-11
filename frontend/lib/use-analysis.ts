@@ -2,6 +2,7 @@
 
 import { useState, useCallback, useRef } from "react";
 import { scoreLabel } from "./utils";
+import { addSessionAssessment } from "./session-history";
 import type { PipelineStep, EvaluationResponse, AppState } from "./types";
 
 export const API_URL =
@@ -191,10 +192,17 @@ export function useAnalysis() {
               break;
             }
 
-            case "complete":
-              setResult(evtData as unknown as EvaluationResponse);
+            case "complete": {
+              const final = evtData as unknown as EvaluationResponse;
+              setResult(final);
               setState("done");
+              addSessionAssessment({
+                timestamp: final.evaluation_timestamp,
+                narrative,
+                sovereign_risk_score: final.assessment.sovereign_risk_score,
+              });
               break outer;
+            }
 
             case "error":
               throw new Error(String(evtData.message ?? "Unknown pipeline error"));

@@ -6,6 +6,8 @@ import { ChatInput } from "@/components/chat-input";
 import { PipelineFeed } from "@/components/pipeline-feed";
 import { RiskResults } from "@/components/risk-results";
 import { HistoryPanel } from "@/components/history-panel";
+import { AlertSubscription } from "@/components/alert-subscription";
+import { DocumentBank } from "@/components/document-bank";
 
 export default function Home() {
   const { state, steps, result, error, analyse, reset } = useAnalysis();
@@ -17,6 +19,12 @@ export default function Home() {
 
   return (
     <main className="min-h-screen bg-[#0a0a0a] text-neutral-100">
+      {/* Independent alert-subscription / background-monitor card (top-right) */}
+      <AlertSubscription />
+
+      {/* Document-bank curator agent card (top-left) */}
+      <DocumentBank />
+
       <div className="max-w-3xl mx-auto px-4 py-12">
         {/* Header */}
         <div

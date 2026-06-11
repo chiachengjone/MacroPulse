@@ -16,11 +16,11 @@
 
 ## What is MacroPulse?
 
-MacroPulse ingests unstructured financial narratives — news articles, analyst memos, market dispatches — and produces **fact-audited, evidence-grounded sovereign risk assessments** using a two-agent AI pipeline.
+MacroPulse ingests unstructured financial narratives — news articles, analyst memos, market dispatches — and produces **fact-audited, evidence-grounded sovereign risk assessments** through a two-agent AI pipeline.
 
-A **Fact Auditor** agent searches an institutional macro-economics knowledge base (Elasticsearch Serverless) to cross-reference the narrative against real research documents, identifying data gaps, inflated claims, and factual errors. A **Sovereign Risk Specialist** agent then synthesises that audit with the retrieved evidence to produce a structured country risk profile with an alert escalation decision.
+A **Fact Auditor** agent searches a self-curating Elasticsearch knowledge base of institutional macro research to cross-reference the narrative against real evidence, identifying data gaps, inflated claims, and factual errors. A **Sovereign Risk Specialist** agent then synthesises the audit and retrieved documents into a structured risk profile.
 
-The platform is built on **Google Cloud's Vertex AI** (Gemini 2.5 Flash) and **Elasticsearch Serverless**, connected via Elastic's official **Model Context Protocol (MCP)** server.
+The platform is built on **Google Cloud's Vertex AI** (Gemini 2.5 Flash) and **Elasticsearch Serverless**, connected via Elastic's official **Model Context Protocol (MCP)** server. It runs fully on Google Cloud Run with no external compute dependencies.
 
 ---
 
@@ -43,55 +43,39 @@ The platform is built on **Google Cloud's Vertex AI** (Gemini 2.5 Flash) and **E
 ┌─────────────────────────────────────────────────────────────────┐
 │                    MacroPulse Platform                          │
 │                                                                 │
-│  User Input                                                     │
-│  (Narrative + Context)                                          │
+│  User Input (narrative / article URL / preset)                  │
 │        │                                                        │
 │        ▼                                                        │
-│  ┌─────────────┐   SSE stream API   ┌────────────────────────┐  │
-│  │  frontend/  │ ──────────────────▶│ POST /api/v1/evaluate  │  │
-│  │  (Next.js)  │ ◀──────────────────│        /stream         │  │
-│  └─────────────┘   live pipeline    └───────────┬────────────┘  │
-│                                                ▼                │
-│                          ┌─────────────────────────────────┐    │
-│                          │   AGENT 1 — Fact Auditor        │    │
-│                          │   Persona: Credit Rating Agency  │    │
-│                          │   Model: Gemini 2.5 Flash        │    │
-│                          │                                 │    │
-│                          │   Tool-calling loop:            │    │
-│                          │   search_macro_data(query) ─────┼──▶ │
-│                          └─────────────┬───────────────────┘    │
-│                                        │                        │
-│            ┌──────────────────────────▼──────────────────────┐  │
-│            │        Elastic MCP Server (bundled binary)      │  │
-│            │        docker.elastic.co/mcp/elasticsearch      │  │
-│            │        stdio subprocess — same network context  │  │
-│            └──────────────────────────┬──────────────────────┘  │
+│  ┌─────────────┐   SSE stream    ┌────────────────────────────┐ │
+│  │  frontend/  │ ──────────────▶ │  POST /api/v1/evaluate     │ │
+│  │  (Next.js)  │ ◀──────────────  │       /stream              │ │
+│  └─────────────┘  live pipeline  └────────────┬───────────────┘ │
+│                                               ▼                 │
+│                         ┌─────────────────────────────────┐     │
+│                         │   AGENT 1 — Fact Auditor        │     │
+│                         │   Model: Gemini 2.5 Flash       │     │
+│                         │   Tool-calling loop:            │     │
+│                         │   search_macro_data(query) ─────┼──▶  │
+│                         └─────────────┬───────────────────┘     │
 │                                       │                         │
-│            ┌──────────────────────────▼──────────────────────┐  │
-│            │     Elasticsearch Serverless                     │  │
-│            │     Index: macro-pulse-files                    │  │
-│            │                                                  │  │
-│            │     Hybrid Retrieval (RRF):                     │  │
-│            │     ├── Text: multi_match (title^3, content^2)  │  │
-│            │     └── Vector: kNN (.multilingual-e5-small)    │  │
-│            └──────────────────────────────────────────────────┘  │
+│           ┌───────────────────────────▼──────────────────────┐  │
+│           │     Elastic MCP Server (bundled binary)          │  │
+│           │     docker.elastic.co/mcp/elasticsearch         │  │
+│           └───────────────────────────┬──────────────────────┘  │
 │                                       │                         │
-│                          ┌────────────▼────────────────────┐    │
-│                          │   AGENT 2 — Risk Specialist     │    │
-│                          │   Persona: Tier-1 IB Analyst    │    │
-│                          │   Model: Gemini 2.5 Flash        │    │
-│                          │                                 │    │
-│                          │   Input: narrative + audit +    │    │
-│                          │   grounding docs                │    │
-│                          │   Output: SovereignRisk         │    │
-│                          │   Assessment (JSON schema)      │    │
-│                          └──────────────┬──────────────────┘    │
-│                                         │                       │
-│                          ┌──────────────▼──────────────────┐    │
-│                          │   Webhook (async)               │    │
-│                          │   Trading desk alert if         │    │
-│                          │   score ≥ 7.5                   │    │
-│                          └─────────────────────────────────┘    │
+│           ┌───────────────────────────▼──────────────────────┐  │
+│           │     Elasticsearch Serverless                      │  │
+│           │     Index: macro-pulse-files (169+ docs)         │  │
+│           │     Hybrid Retrieval (RRF):                      │  │
+│           │     ├── BM25 multi_match (title^3, content^2)    │  │
+│           │     └── kNN (.multilingual-e5-small)             │  │
+│           └───────────────────────────────────────────────────┘  │
+│                                       │                         │
+│                         ┌─────────────▼───────────────────┐     │
+│                         │   AGENT 2 — Risk Specialist     │     │
+│                         │   Model: Gemini 2.5 Flash       │     │
+│                         │   Output: SovereignRiskAssessment│    │
+│                         └─────────────────────────────────┘     │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -103,60 +87,65 @@ The platform is built on **Google Cloud's Vertex AI** (Gemini 2.5 Flash) and **E
 |---|---|
 | **LLM Orchestration** | Gemini 2.5 Flash via Vertex AI (Application Default Credentials) |
 | **Knowledge Base** | Elasticsearch Serverless — index `macro-pulse-files` |
-| **Audit Trail** | Elasticsearch Serverless — index `macro-pulse-audit` (every assessment persisted) |
+| **Audit Trail** | Elasticsearch Serverless — index `macro-pulse-audit` |
+| **Alert Subscribers** | Elasticsearch Serverless — index `macro-alert-subscribers` |
+| **Bank Config** | Elasticsearch Serverless — index `macro-bank-config` |
 | **MCP Integration** | Official Elastic MCP server (`docker.elastic.co/mcp/elasticsearch`) |
 | **Retrieval** | Hybrid RRF: `multi_match` (BM25) + kNN (`.multilingual-e5-small`) |
-| **API Framework** | FastAPI + `fastapi-mcp` (exposes own MCP server at `/mcp`) |
-| **UI** | Next.js 15 (App Router) + React 19 + Tailwind CSS — live SSE pipeline dashboard |
-| **Deployment** | Google Cloud Run (serverless containers) |
+| **API Framework** | FastAPI + `fastapi-mcp` (exposes `/mcp`) |
+| **UI** | Next.js 15 (App Router) + React 19 + Tailwind CSS |
+| **Deployment** | Google Cloud Run (two services — API + dashboard) |
+| **Scheduler** | Google Cloud Scheduler (alert sweep + bank curation) |
+| **Email** | Resend API |
+| **Market Data** | FRED (St. Louis Fed) + open.er-api.com |
+| **Bank Discovery** | Tavily Search API (restricted to whitelisted institutional domains) |
 | **Container** | Python 3.11-slim + bundled Elastic MCP binary (multi-stage Docker) |
 
 ---
 
 ## Key Features
 
-### 1. Hybrid Retrieval (RRF)
-`app.py` — `search_macro_data(query)`
-
-Attempts **Elasticsearch Reciprocal Rank Fusion** combining:
-- BM25 `multi_match` across `attachment.title^3` and `attachment.content^2`
-- kNN vector search via `.multilingual-e5-small` on `attachment.content_embedding`
-
-Automatically falls back to a high-fidelity keyword `multi_match` if the vector index is unavailable.
-
-### 2. Two-Agent Correction Loop
+### 1. Two-Agent Correction Loop
 `main.py` — `_run_agent1_auditor` + `_run_agent2_specialist`
 
-**Agent 1 — Fact Auditor**: Uses Gemini's function-calling to iteratively retrieve documents from Elasticsearch, then writes a structured audit identifying DATA GAPS, INFLATIONS, and ERRORS in the input narrative.
+**Agent 1 — Fact Auditor**: Tool-calling loop (up to 2 turns) against Elasticsearch. Identifies DATA GAPS, INFLATIONS, and ERRORS in the input narrative, citing retrieved documents.
 
-**Agent 2 — Sovereign Risk Specialist**: Receives the narrative, the Auditor's full report, and the raw grounding documents. Produces a `SovereignRiskAssessment` with:
-- `raw_narrative_score` (0.0 – 10.0) — risk if the narrative is taken at face value (pre-audit)
-- `sovereign_risk_score` (0.0 – 10.0) — the audit-**adjusted** final score
-- `primary_threat_vector`
-- `audit_findings` (from Agent 1)
-- `impact_assessment`
-- `requires_immediate_alert` (bool)
-- `grounding_strength` (`STRONG` / `PARTIAL` / `LIMITED`) + `grounding_note`
-- `sources` — titles of the knowledge-base documents that grounded the assessment
+**Agent 2 — Sovereign Risk Specialist**: Synthesises narrative + audit + grounding docs into a `SovereignRiskAssessment`:
 
-### 3. Grounding Transparency (calibrated confidence)
-`main.py` — Agent 2 judges how well the retrieved corpus actually grounds *this specific* narrative and emits a tier:
-- **STRONG** — entity-specific evidence found (e.g. an IMF Article IV for the exact country, or that central bank's report)
-- **PARTIAL** — only general macro/sovereign-risk research; the score rests on the narrative, not corroborating evidence
-- **LIMITED** — retrieved documents are off-topic or absent (e.g. an out-of-domain prompt)
+| Field | Description |
+|---|---|
+| `raw_narrative_score` | 0–10 risk if the narrative is taken at face value |
+| `sovereign_risk_score` | Audit-adjusted final score |
+| `primary_threat_vector` | e.g. "Sovereign Default Risk", "FX Volatility" |
+| `audit_findings` | Structured DATA GAPS / INFLATIONS / ERRORS |
+| `impact_assessment` | Transmission mechanisms and second-order effects |
+| `grounding_strength` | `STRONG / PARTIAL / LIMITED` |
+| `grounding_note` | One sentence naming the evidence basis |
+| `sources` | Titles of retrieved grounding documents |
+| `action_disposition` | Autonomy decision (see §5) |
 
-The dashboard surfaces this as a coloured badge + one-line rationale + a list of the cited source documents. Instead of silently degrading on unfamiliar inputs, the system **states how confident it is** — and the `raw → adjusted` score delta makes the two-agent correction visible.
+### 2. Hybrid Retrieval (RRF)
+`app.py` — `_search_with_sources`
 
-### 4. MCP Dual Role
-MacroPulse both **consumes** Elastic's MCP server (for knowledge retrieval) and **exposes** its own MCP server at `/mcp` via `fastapi-mcp`, making all API endpoints discoverable as tools for Google Cloud Agent Builder.
+Elasticsearch Reciprocal Rank Fusion combining BM25 `multi_match` across `attachment.title^3` / `attachment.content^2` with kNN vector search via `.multilingual-e5-small`. Automatic keyword fallback if the vector index is unavailable.
 
-### 5. Next.js Live Pipeline Dashboard
-`frontend/` — a Next.js 15 + React 19 dashboard that streams the two-agent pipeline in real time over Server-Sent Events (`POST /api/v1/evaluate/stream`). Users enter their own narrative (or pick an example), then watch each step appear live — auditor reasoning, Elasticsearch search queries, retrieved sources, the grounding verdict, and the final risk score, threat vector, and impact assessment.
+### 3. Article Ingestion & URL Fetch
+`main.py` — `POST /api/v1/fetch-article`
 
-### 6. Confidence-Gated Autonomy
-`main.py` — `decide_disposition(score, grounding)`
+Paste a news article URL → the backend fetches it, strips HTML, and Gemini writes a clean 150–250 word financial summary that lands in the narrative input. Handles `<article>` / `<main>` extraction, `.ashx` PDF links, and graceful fallback to raw text. Alternatively, paste the article excerpt directly.
 
-A **deterministic policy** (not an LLM call) maps `(audit-adjusted score × grounding strength)` to an `action_disposition`:
+### 4. Grounding Transparency
+Three tiers surfaced on every assessment:
+- **STRONG** — entity-specific evidence found (e.g. the exact country's IMF Article IV)
+- **PARTIAL** — only general macro research; score rests on the narrative
+- **LIMITED** — off-topic or absent; treat score as low-confidence
+
+Raw score → adjusted score delta makes the Auditor's correction visible and testable.
+
+### 5. Confidence-Gated Autonomy
+`main.py` — `decide_disposition`
+
+A **deterministic code policy** (not an LLM call) maps `score × grounding` to an action:
 
 | Grounding | Score ≥ 7.5 | Score 5–7.5 | Score < 5 |
 |---|---|---|---|
@@ -164,13 +153,44 @@ A **deterministic policy** (not an LLM call) maps `(audit-adjusted score × grou
 | **PARTIAL** | `ESCALATE_FLAGGED` | `HUMAN_REVIEW` | `STANDARD_QUEUE` |
 | **LIMITED** | `HUMAN_REVIEW` | `HUMAN_REVIEW` | `HUMAN_REVIEW` |
 
-The system **only auto-dispatches an alert when it is confident enough to act**. `LIMITED` grounding and weak evidence are always routed to `HUMAN_REVIEW` — the agent knows when to defer to a human. The rule is in code (not the model), so it's transparent, auditable, and consistent.
+`LIMITED` grounding is always routed to `HUMAN_REVIEW`. The system only acts autonomously when confident.
 
-### 7. Searchable Audit Trail
-Every assessment is persisted to a second Elasticsearch index (`macro-pulse-audit`) as a fire-and-forget write. Fields include the narrative, both scores, grounding strength, disposition, sources, and timestamp. The trail is exposed at `GET /api/v1/history` and is **queryable via the same Elastic MCP** — "show me all HUMAN_REVIEW cases this week" is a natural-language query. The same stack that grounds decisions also records them.
+### 6. Searchable Audit Trail
+Every assessment is persisted to `macro-pulse-audit` in Elasticsearch with narrative, scores, grounding, disposition, sources, and timestamp. Exposed at `GET /api/v1/history` and queryable via the Elastic MCP server.
 
-### 8. Async Trading Desk Alerts
-Fire-and-forget webhook dispatch — **gated by the autonomy policy**. Only `AUTO_ESCALATE` and `ESCALATE_FLAGGED` dispositions trigger an alert; `HUMAN_REVIEW` and below are never auto-dispatched. Severity tiers (CRITICAL / HIGH / MEDIUM / LOW) and SLA windows are applied to all dispatched alerts.
+### 7. Real-Time SSE Dashboard
+`frontend/` — Next.js 15 + React 19. Each pipeline step (agent start, Elasticsearch search query, retrieved sources, scoring, disposition decision) streams live over Server-Sent Events. Session-scoped assessment history (no cross-user leakage).
+
+### 8. MCP Dual Role
+MacroPulse both **consumes** Elastic's official MCP server (for knowledge retrieval) and **exposes** its own MCP server at `/mcp` via `fastapi-mcp`, making all API endpoints discoverable as tools for Google Cloud Agent Builder.
+
+### 9. Alert Subscription & Live Briefings
+`main.py` — `/api/v1/alerts/*`
+
+Subscribers choose from **16 FRED-covered sovereigns** (US, Germany, UK, France, Italy, Spain, Canada, Japan, Australia, S. Korea, Mexico, Brazil, India, Türkiye, China, S. Africa) and two metrics (Interest Rates, Inflation). On each scheduled run or manual trigger:
+
+1. Pulls live FRED indicators (10Y yields, CPI, Fed Funds, yield curve spread, VIX) for the selected countries — restricted to what FRED actually provides so every filter is backed by real data
+2. Gemini writes a concise briefing covering every selected sovereign with its actual figures
+3. Delivered via **Resend email** to the subscriber's address
+4. Email alerts can be toggled on/off per profile
+
+Cloud Scheduler runs the subscriber sweep every 15 minutes. Profiles are persisted in `macro-alert-subscribers` Elasticsearch index, keyed by email (no duplicates).
+
+### 10. Self-Curating Document Bank
+`main.py` — `/api/v1/bank/*`
+
+An autonomous agent maintains the Elasticsearch knowledge base (cap: 1,000 documents):
+
+- **Discovery**: Tavily Search API restricted to 69 whitelisted official institutional domains (IMF, BIS, World Bank, OECD, ECB, ADB, AfDB, IADB, EBRD, AIIB, FSB, NBER, CEPR, ~35 central banks, US Treasury/CBO/BLS)
+- **Ingestion**: ML-health preflight before every ingest (aborts if e5 not started), max 5 PDFs per run, one-at-a-time with 2s pacing and verification — never a bulk spike
+- **Removal**: Only trims above the 1,000-doc cap; only removes curator-added docs (originals protected); metadata archived before deletion
+- **Schedule**: Driven by the user's focus filters (16 FRED countries + 9 macro topics) rotated deterministically across daily Cloud Scheduler runs
+- **Controls**: "Preview" (dry-run), "Curate Now" (immediate run), interval (6h–weekly), autonomous ON/OFF — all in the dashboard card
+
+### 11. Resilience
+- 429-aware retry with jittered exponential backoff (5s → 12s → 25s) on all Gemini calls
+- Per-instance concurrency semaphore prevents simultaneous pipeline executions from stacking against the Vertex AI quota
+- All ES/API/LLM calls wrapped in try/except with graceful fallbacks
 
 ---
 
@@ -178,18 +198,26 @@ Fire-and-forget webhook dispatch — **gated by the autonomy policy**. Only `AUT
 
 ```
 MacroPulse/
-├── app.py              # Elastic MCP client + hybrid search tool (FastMCP server)
-├── main.py             # FastAPI server, two-agent orchestration, SSE stream, MCP mount
-├── frontend/           # Next.js 15 dashboard (live SSE pipeline UI)
-│   ├── app/            # App Router pages + client dashboard
-│   ├── components/     # Chat input, pipeline feed, risk results
-│   └── lib/            # SSE client hook, types, helpers
-├── ingest.py           # Bulk PDF → Elasticsearch loader (Tika extract + e5 embeddings)
-├── Dockerfile          # Multi-stage: bundles Elastic MCP binary into Python image
+├── app.py              # Elastic MCP client + hybrid search (FastMCP server)
+├── main.py             # FastAPI server: two-agent pipeline, SSE, alerts, bank curator
+├── ingest.py           # Bulk PDF → Elasticsearch loader (Tika + e5 embeddings)
 ├── requirements.txt    # Pinned Python dependencies
-├── .env.example        # Template for required environment variables
+├── Dockerfile          # Multi-stage: bundles Elastic MCP binary
+├── .env.example        # Environment variable template
 ├── LICENSE             # MIT
-└── README.md
+├── frontend/
+│   ├── app/            # Next.js App Router pages
+│   ├── components/
+│   │   ├── chat-input.tsx         # Narrative input + URL fetch + preset pills
+│   │   ├── pipeline-feed.tsx      # Live SSE pipeline display
+│   │   ├── risk-results.tsx       # Assessment output card
+│   │   ├── history-panel.tsx      # Session-scoped recent assessments
+│   │   ├── alert-subscription.tsx # Alert monitor card (top-right)
+│   │   └── document-bank.tsx      # Bank curator card (top-left)
+│   └── lib/
+│       ├── use-analysis.ts        # SSE streaming hook
+│       ├── session-history.ts     # sessionStorage assessment log
+│       └── types.ts               # Shared TypeScript types
 ```
 
 ---
@@ -210,7 +238,7 @@ git clone https://github.com/chiachengjone/MacroPulse.git
 cd MacroPulse
 
 cp .env.example .env
-# Edit .env with your ELASTIC_ENDPOINT, ELASTIC_API_KEY, GOOGLE_CLOUD_PROJECT
+# Edit .env with your credentials
 ```
 
 ### 2. Install dependencies
@@ -219,103 +247,83 @@ cp .env.example .env
 pip install -r requirements.txt
 ```
 
-### 3. Run the API server (local)
+### 3. Run the API server
 
-Ensure Docker Desktop is running (for the Elastic MCP stdio subprocess), then:
+Ensure Docker Desktop is running (for the Elastic MCP stdio subprocess):
 
 ```bash
 python -m uvicorn main:app --reload --port 8080
 ```
 
-Server starts at `http://localhost:8080`. Swagger UI at `http://localhost:8080/docs`.
+Swagger UI: `http://localhost:8080/docs`
 
-### 4. Run the Next.js dashboard (separate terminal)
+### 4. Run the dashboard
 
 ```bash
-cd frontend
-npm install
-npm run dev
+cd frontend && npm install && npm run dev
 ```
 
-Opens at `http://localhost:3000`. By default `frontend/.env.local` points `NEXT_PUBLIC_API_URL` at the deployed Cloud Run instance; set it to `http://localhost:8080` to hit your local server.
+Opens at `http://localhost:3000`. Set `NEXT_PUBLIC_API_URL=http://localhost:8080` in `frontend/.env.local` to hit your local server.
+
+---
+
+## Environment Variables
+
+| Variable | Required | Description |
+|---|---|---|
+| `GOOGLE_CLOUD_PROJECT` | ✅ | GCP project ID for Vertex AI |
+| `GOOGLE_CLOUD_LOCATION` | ✅ | Vertex AI region (use `global`) |
+| `ELASTIC_ENDPOINT` | ✅ | Elasticsearch Serverless HTTPS URL |
+| `ELASTIC_API_KEY` | ✅ | Base64-encoded Elastic API key |
+| `FRED_API_KEY` | ✅ | FRED API key (free at fred.stlouisfed.org) |
+| `RESEND_API_KEY` | ✅ | Resend API key for email delivery |
+| `TAVILY_API_KEY` | ✅ | Tavily Search API key for bank curation |
+| `ALERT_SWEEP_TOKEN` | ✅ | Shared secret for Cloud Scheduler → sweep endpoints |
+| `TRADING_DESK_WEBHOOK_URL` | — | Alert webhook (defaults to httpbin.org/post) |
+| `ALERT_EMAIL_FROM` | — | Resend sender address (default: onboarding@resend.dev) |
+| `ELASTIC_MCP_URL` | — | Leave blank (uses bundled binary) |
 
 ---
 
 ## API Reference
 
-### `POST /api/v1/evaluate`
+### Risk Assessment
 
-Primary endpoint. Runs the full two-agent cascade.
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/api/v1/evaluate` | Full two-agent assessment |
+| `POST` | `/api/v1/evaluate/stream` | SSE-streaming variant |
+| `POST` | `/api/v1/fetch-article` | Fetch + summarise a URL into a narrative |
+| `GET` | `/api/v1/history` | Recent assessment audit trail |
 
-**Request body:**
-```json
-{
-  "narrative": "Argentina has suspended all external debt payments...",
-  "context": "Sovereign default, EM credit, FX crisis"
-}
-```
+### Alert Monitoring
 
-**Response:**
-```json
-{
-  "assessment": {
-    "raw_narrative_score": 9.0,
-    "sovereign_risk_score": 8.5,
-    "primary_threat_vector": "Sovereign Default Risk",
-    "audit_findings": "DATA GAPS: ...\nINFLATIONS: ...\nERRORS: ...",
-    "impact_assessment": "The suspension of debt payments transmits via...",
-    "requires_immediate_alert": true,
-    "grounding_strength": "STRONG",
-    "grounding_note": "Corroborated by the IMF Article IV consultation and BIS Quarterly Review for the region.",
-    "sources": [
-      "IMF Argentina 2026 Article IV Consultation + 2nd EFF Review",
-      "BIS Quarterly Review (issue 2603)"
-    ]
-  },
-  "model_used": "gemini-2.5-flash",
-  "evaluation_timestamp": "2026-06-07T10:21:49.708179+00:00",
-  "alert_dispatched": true
-}
-```
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/v1/alerts/catalog` | FRED-covered countries + metrics |
+| `POST` | `/api/v1/alerts/subscribe` | Create or update a subscriber profile |
+| `GET` | `/api/v1/alerts/subscriber/{email}` | Load a subscriber profile |
+| `POST` | `/api/v1/alerts/market-feed` | Live FX snapshot |
+| `POST` | `/api/v1/alerts/run` | Trigger an immediate briefing + email |
+| `POST` | `/api/v1/alerts/sweep` | Scheduled sweep (token-protected) |
 
-### `POST /api/v1/evaluate/stream`
+### Document Bank
 
-Streaming variant of `/api/v1/evaluate`. Returns a Server-Sent Events stream, emitting one event per pipeline step (`agent1_start`, `agent1_thinking`, `agent1_search`, `agent1_complete`, `agent2_start`, `cross_check`, `agent2_complete`) before a final `complete` event carrying the full `EvaluationResponse` JSON. This powers the live pipeline feed in the Next.js dashboard.
-
-### `GET /health`
-
-```json
-{
-  "status": "healthy",
-  "service": "MacroPulse Analytics Bridge",
-  "version": "5.0.0",
-  "model": "gemini-2.5-flash",
-  "elastic_mcp": "connected"
-}
-```
-
-### `GET /docs`
-Interactive Swagger UI — test both endpoints in-browser.
-
-### `GET /mcp`
-MCP server endpoint — discoverable by Google Cloud Agent Builder and other MCP clients.
-
-### `POST /evaluate-risk` *(legacy alias)*
-Same handler as `/api/v1/evaluate`. Maintained for backward compatibility.
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/v1/bank/catalog` | Available countries, topics, intervals |
+| `GET` | `/api/v1/bank/config` | Current curator configuration |
+| `POST` | `/api/v1/bank/config` | Save curator configuration |
+| `GET` | `/api/v1/bank/docs` | List all documents in the bank |
+| `POST` | `/api/v1/bank/curate` | Run curation now (`?dry_run=true` for preview) |
+| `POST` | `/api/v1/bank/sweep` | Scheduled curator sweep (token-protected) |
 
 ---
 
 ## Deploying to Google Cloud Run
 
 ```bash
-# Authenticate and set project
-gcloud auth login
-gcloud config set project YOUR_PROJECT_ID
-
-# Enable required APIs
-gcloud services enable run.googleapis.com cloudbuild.googleapis.com
-
-# Deploy (Cloud Build handles the multi-stage Docker build automatically)
+# Backend
 gcloud run deploy macropulse \
   --source . \
   --platform managed \
@@ -323,20 +331,9 @@ gcloud run deploy macropulse \
   --allow-unauthenticated \
   --port 8080 \
   --memory 1Gi \
-  --set-env-vars "GOOGLE_CLOUD_PROJECT=YOUR_PROJECT_ID,\
-GOOGLE_CLOUD_LOCATION=global,\
-ELASTIC_ENDPOINT=YOUR_ES_ENDPOINT,\
-ELASTIC_API_KEY=YOUR_API_KEY,\
-TRADING_DESK_WEBHOOK_URL=https://httpbin.org/post"
-```
+  --set-env-vars "GOOGLE_CLOUD_PROJECT=YOUR_PROJECT_ID,..."
 
-> The Dockerfile uses a multi-stage build to copy the AMD64 Elastic MCP binary from `docker.elastic.co/mcp/elasticsearch` into the Python image. No separate Elastic MCP service is needed on Cloud Run.
-
-### Deploying the dashboard (frontend)
-
-The Next.js dashboard deploys as a separate Cloud Run service using its own multi-stage Dockerfile (`frontend/Dockerfile`, standalone output):
-
-```bash
+# Dashboard
 cd frontend
 gcloud run deploy macropulse-dashboard \
   --source . \
@@ -347,20 +344,23 @@ gcloud run deploy macropulse-dashboard \
   --memory 512Mi
 ```
 
-> `NEXT_PUBLIC_API_URL` is baked into the bundle at build time (set in `frontend/Dockerfile`). The backend's CORS policy (`allow_origins=["*"]`) permits the dashboard's cross-origin calls.
+### Cloud Scheduler jobs
 
----
+```bash
+# Alert subscriber sweep (every 15 min)
+gcloud scheduler jobs create http macropulse-alert-sweep \
+  --schedule "*/15 * * * *" \
+  --uri "https://<API_URL>/api/v1/alerts/sweep" \
+  --http-method POST \
+  --headers "X-Sweep-Token=YOUR_TOKEN"
 
-## Environment Variables
-
-| Variable | Required | Description |
-|---|---|---|
-| `GOOGLE_CLOUD_PROJECT` | ✅ | GCP project ID for Vertex AI |
-| `GOOGLE_CLOUD_LOCATION` | ✅ | Vertex AI region (use `global`) |
-| `ELASTIC_ENDPOINT` | ✅ | HTTPS URL of your Elasticsearch Serverless deployment |
-| `ELASTIC_API_KEY` | ✅ | Base64-encoded Elastic API key (id:secret format) |
-| `ELASTIC_MCP_URL` | — | Leave empty; only set if running a separate Elastic MCP HTTP service |
-| `TRADING_DESK_WEBHOOK_URL` | — | Alert webhook endpoint (defaults to `httpbin.org/post`) |
+# Daily document bank curation (06:00 UTC)
+gcloud scheduler jobs create http macropulse-bank-curator \
+  --schedule "0 6 * * *" \
+  --uri "https://<API_URL>/api/v1/bank/sweep" \
+  --http-method POST \
+  --headers "X-Sweep-Token=YOUR_TOKEN"
+```
 
 ---
 
@@ -368,11 +368,11 @@ gcloud run deploy macropulse-dashboard \
 
 | Requirement | Status | Implementation |
 |---|---|---|
-| Uses Google Cloud | ✅ | Vertex AI (Gemini 2.5 Flash), Cloud Run, Cloud Build |
-| Uses Gemini | ✅ | `gemini-2.5-flash` via `google-genai` SDK, Vertex AI ADC |
-| Integrates Elastic's MCP server | ✅ | `docker.elastic.co/mcp/elasticsearch` — official binary bundled in Docker image, runs as stdio subprocess |
-| Multi-step reasoning / agentic | ✅ | Agent 1 runs a tool-calling loop (up to 2 turns); Agent 2 synthesises multi-source context + judges grounding confidence |
-| Functional agent (executes actions) | ✅ | Searches Elasticsearch, audits narratives, persists to audit trail, fires confidence-gated trading desk alerts |
+| Uses Google Cloud | ✅ | Vertex AI (Gemini 2.5 Flash), Cloud Run (2 services), Cloud Scheduler (2 jobs), Cloud Build |
+| Uses Gemini | ✅ | `gemini-2.5-flash` via `google-genai` SDK on Vertex AI ADC — risk agents, article summariser, bank curator, alert briefer |
+| Integrates Elastic's MCP server | ✅ | `docker.elastic.co/mcp/elasticsearch` — official binary bundled in multi-stage Docker image, spawned as stdio subprocess at runtime |
+| Multi-step reasoning / agentic | ✅ | Agent 1 runs a tool-calling loop against Elasticsearch; Agent 2 synthesises multi-source context; bank curator discovers → ranks → ingests → trims autonomously |
+| Functional agent (executes actions) | ✅ | Searches Elasticsearch, audits narratives, persists audit trail, fires confidence-gated alerts, curates and ingests knowledge-base documents |
 | Exposes MCP server | ✅ | `fastapi-mcp` at `/mcp` — all FastAPI endpoints auto-exposed as MCP tools |
 | Public open-source repo | ✅ | [github.com/chiachengjone/MacroPulse](https://github.com/chiachengjone/MacroPulse) |
 | Open-source license | ✅ | MIT License |
@@ -382,7 +382,7 @@ gcloud run deploy macropulse-dashboard \
 
 ## How the Elastic MCP Integration Works
 
-MacroPulse uses Elastic's **official** MCP server binary rather than querying Elasticsearch directly. This is achieved via a multi-stage Docker build:
+MacroPulse uses Elastic's **official** MCP server binary bundled via a multi-stage Docker build:
 
 ```dockerfile
 FROM --platform=linux/amd64 docker.elastic.co/mcp/elasticsearch AS elastic-mcp
@@ -390,60 +390,54 @@ FROM python:3.11-slim
 COPY --from=elastic-mcp /usr/local/bin/elasticsearch-core-mcp-server /usr/local/bin/
 ```
 
-At runtime, `main.py` detects the bundled binary and spawns it as a `stdio` subprocess using the MCP Python SDK's `StdioServerParameters`. The Python `ClientSession` then calls its tools — `search`, `list_indices`, `get_mappings` — using the standard Model Context Protocol.
+At runtime, `main.py` spawns the binary as a `stdio` subprocess using the MCP Python SDK's `StdioServerParameters`. The Python `ClientSession` calls its tools — `search`, `list_indices`, `get_mappings` — via the standard Model Context Protocol.
 
-This approach avoids Docker-in-Docker and keeps the Elastic MCP server in the same network context as the application, resolving authentication issues that arise when running it as a separate Cloud Run service.
-
----
-
-## Why Sovereign Risk?
-
-Sovereign risk analysis is a high-stakes, information-dense task where AI can deliver outsized value:
-
-- Analysts must synthesise hundreds of pages of institutional research on tight deadlines
-- Narratives in financial media are often exaggerated or selectively sourced
-- A structured, evidence-grounded audit before any risk score is assigned is standard practice at rating agencies — but rarely automated
-
-MacroPulse automates exactly this workflow: retrieve evidence → audit the narrative → score the risk.
+This avoids Docker-in-Docker and keeps the Elastic MCP server in the same network context as the application.
 
 ---
 
 ## Sample Scenarios to Test
 
-**High-Risk (alerts should fire):**
+**High-risk (alert should fire):**
 ```
-Narrative: Turkey's central bank has exhausted its net FX reserves following a speculative
-attack on the lira. The government has suspended convertibility and capital controls are
-expected imminently. Dollarisation sentiment is rising rapidly.
-Context: FX crisis, EM sovereign, liquidity crunch
+Turkey's central bank net FX reserves have collapsed to $24 billion after the CBRT
+spent $38 billion defending the lira. USD/TRY has surged past 43, five-year sovereign
+CDS spreads exceed 300bps. After five consecutive rate cuts, the CBRT held at 37% in
+March 2026. Current account deficit is projected at $45 billion.
+Context: FX volatility, sovereign CDS, EM credit, Turkey
 ```
 
-**Low-Risk (audit should surface contradictions):**
+**Low-risk (audit corrects inflated narrative):**
 ```
-Narrative: Argentina has defaulted on all external debt and the peso has collapsed 45%
-in 72 hours. EM contagion is spreading to Turkey and Pakistan.
-Context: Sovereign default, EM credit
+Argentina has defaulted on all external debt and the peso has collapsed 45% in 72
+hours. EM contagion is spreading to Turkey and Pakistan, with CDS spreads widening
+by 300-500bps across the board.
+Context: Sovereign default, EM contagion
 ```
-*(The knowledge base contains BIS Quarterly Reviews showing Latin American currencies
-outperforming in 2025-2026, so the Auditor will flag this as contradicted by evidence.)*
+*(The bank contains IMF Argentina 2026 Article IV and World Bank reports documenting
+Milei's stabilisation — the Auditor flags the default claim as contradicted, producing
+a large raw→adjusted score correction with STRONG grounding.)*
 
-**Inflated narrative → strong audit correction (Singapore):**
+**Singapore banking stress (strong grounding correction):**
 ```
-Narrative: Singapore's banks are reportedly carrying dangerous exposure to distressed
-Chinese property developers as home prices crater and the SGD slides, with speculation
-MAS will abandon its exchange-rate framework amid capital flight.
-Context: Banking stability, property, SGD, MAS policy
+Singapore's banks are carrying dangerous exposure to distressed Chinese property
+developers as home prices crater and the SGD slides, with speculation MAS will
+abandon its exchange-rate framework amid capital flight.
+Context: Banking stability, SGD, MAS policy
 ```
-*(Grounded by MAS Financial Stability Reviews and the IMF Singapore Article IV — the
-Auditor flags the alarmist framing as contradicted, producing a large `raw → adjusted`
-score drop with **STRONG** grounding.)*
+*(Grounded by MAS Financial Stability Reviews — Auditor flags the alarmist framing
+as contradicted, large score drop, STRONG grounding.)*
 
-> **Knowledge base.** The corpus is institutional macro research — BIS Quarterly Reviews
-> & Annual Economic Reports, IMF WEO / GFSR / Fiscal Monitor & country Article IVs
-> (Türkiye, Argentina, Egypt, Pakistan, Singapore + Asia-Pacific), World Bank GEP, OECD,
-> and NBER working papers on sovereign default & currency crises. It is loaded into the
-> `macro-pulse-files` index by [`ingest.py`](ingest.py) (Apache Tika text extraction +
-> `.multilingual-e5-small` embeddings via an Elasticsearch ingest pipeline).
+---
+
+## Why Sovereign Risk?
+
+Sovereign risk analysis is a high-stakes, information-dense domain where AI delivers outsized value:
+- Analysts must synthesise hundreds of pages of institutional research on tight deadlines
+- Financial media narratives are frequently exaggerated or selectively sourced
+- A structured, evidence-grounded audit before any risk score is assigned is standard practice at rating agencies — but rarely automated
+
+MacroPulse automates this workflow: **retrieve evidence → audit the narrative → score the risk → act only when confident**.
 
 ---
 
