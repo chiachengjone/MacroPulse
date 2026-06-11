@@ -103,6 +103,7 @@ The platform is built on **Google Cloud's Vertex AI** (Gemini 2.5 Flash) and **E
 |---|---|
 | **LLM Orchestration** | Gemini 2.5 Flash via Vertex AI (Application Default Credentials) |
 | **Knowledge Base** | Elasticsearch Serverless — index `macro-pulse-files` |
+| **Audit Trail** | Elasticsearch Serverless — index `macro-pulse-audit` (every assessment persisted) |
 | **MCP Integration** | Official Elastic MCP server (`docker.elastic.co/mcp/elasticsearch`) |
 | **Retrieval** | Hybrid RRF: `multi_match` (BM25) + kNN (`.multilingual-e5-small`) |
 | **API Framework** | FastAPI + `fastapi-mcp` (exposes own MCP server at `/mcp`) |
@@ -152,8 +153,24 @@ MacroPulse both **consumes** Elastic's MCP server (for knowledge retrieval) and 
 ### 5. Next.js Live Pipeline Dashboard
 `frontend/` — a Next.js 15 + React 19 dashboard that streams the two-agent pipeline in real time over Server-Sent Events (`POST /api/v1/evaluate/stream`). Users enter their own narrative (or pick an example), then watch each step appear live — auditor reasoning, Elasticsearch search queries, retrieved sources, the grounding verdict, and the final risk score, threat vector, and impact assessment.
 
-### 6. Async Trading Desk Alerts
-Fire-and-forget webhook dispatch when `sovereign_risk_score ≥ 7.5` or `requires_immediate_alert = true`, with severity tiers (CRITICAL / HIGH / MEDIUM / LOW) and SLA windows.
+### 6. Confidence-Gated Autonomy
+`main.py` — `decide_disposition(score, grounding)`
+
+A **deterministic policy** (not an LLM call) maps `(audit-adjusted score × grounding strength)` to an `action_disposition`:
+
+| Grounding | Score ≥ 7.5 | Score 5–7.5 | Score < 5 |
+|---|---|---|---|
+| **STRONG** | `AUTO_ESCALATE` | `STANDARD_QUEUE` | `AUTO_CLEAR` |
+| **PARTIAL** | `ESCALATE_FLAGGED` | `HUMAN_REVIEW` | `STANDARD_QUEUE` |
+| **LIMITED** | `HUMAN_REVIEW` | `HUMAN_REVIEW` | `HUMAN_REVIEW` |
+
+The system **only auto-dispatches an alert when it is confident enough to act**. `LIMITED` grounding and weak evidence are always routed to `HUMAN_REVIEW` — the agent knows when to defer to a human. The rule is in code (not the model), so it's transparent, auditable, and consistent.
+
+### 7. Searchable Audit Trail
+Every assessment is persisted to a second Elasticsearch index (`macro-pulse-audit`) as a fire-and-forget write. Fields include the narrative, both scores, grounding strength, disposition, sources, and timestamp. The trail is exposed at `GET /api/v1/history` and is **queryable via the same Elastic MCP** — "show me all HUMAN_REVIEW cases this week" is a natural-language query. The same stack that grounds decisions also records them.
+
+### 8. Async Trading Desk Alerts
+Fire-and-forget webhook dispatch — **gated by the autonomy policy**. Only `AUTO_ESCALATE` and `ESCALATE_FLAGGED` dispositions trigger an alert; `HUMAN_REVIEW` and below are never auto-dispatched. Severity tiers (CRITICAL / HIGH / MEDIUM / LOW) and SLA windows are applied to all dispatched alerts.
 
 ---
 
@@ -354,8 +371,8 @@ gcloud run deploy macropulse-dashboard \
 | Uses Google Cloud | ✅ | Vertex AI (Gemini 2.5 Flash), Cloud Run, Cloud Build |
 | Uses Gemini | ✅ | `gemini-2.5-flash` via `google-genai` SDK, Vertex AI ADC |
 | Integrates Elastic's MCP server | ✅ | `docker.elastic.co/mcp/elasticsearch` — official binary bundled in Docker image, runs as stdio subprocess |
-| Multi-step reasoning / agentic | ✅ | Agent 1 runs a tool-calling loop (up to 4 turns); Agent 2 synthesises multi-source context |
-| Functional agent (executes actions) | ✅ | Searches Elasticsearch, audits narratives, fires trading desk webhooks |
+| Multi-step reasoning / agentic | ✅ | Agent 1 runs a tool-calling loop (up to 2 turns); Agent 2 synthesises multi-source context + judges grounding confidence |
+| Functional agent (executes actions) | ✅ | Searches Elasticsearch, audits narratives, persists to audit trail, fires confidence-gated trading desk alerts |
 | Exposes MCP server | ✅ | `fastapi-mcp` at `/mcp` — all FastAPI endpoints auto-exposed as MCP tools |
 | Public open-source repo | ✅ | [github.com/chiachengjone/MacroPulse](https://github.com/chiachengjone/MacroPulse) |
 | Open-source license | ✅ | MIT License |
