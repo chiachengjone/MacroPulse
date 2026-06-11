@@ -444,7 +444,7 @@ async def trigger_trading_desk_webhook(ticket: dict) -> None:
 async def _run_agent1_auditor(
     narrative: str,
     context: Optional[str],
-    max_turns: int = 4,
+    max_turns: int = 2,
     on_event: Optional[Callable[[str, dict], Any]] = None,
 ) -> tuple[str, str, list[str]]:
     """
